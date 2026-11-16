@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="light">
+  <title>澄明 · DeepSeek 工作台</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+<header>
+  <a class="brand" href="/">澄明<span id="convTitle">DeepSeek 本地工作台</span></a>
+  <button id="settingsOpen" class="quiet">连接设置 <span id="keyState">未连接</span></button>
+</header>
+<main>
+  <nav aria-label="工作模式">
+    <div class="tabs">
+      <button id="chatMode" aria-pressed="true">Chat <span>直接对话</span></button>
+      <button id="workMode" aria-pressed="false">Work <span>计划 · 取证 · 本地计算 · 审查</span></button>
+    </div>
+    <button id="newChat" class="quiet">＋ 新会话</button>
+  </nav>
+
+  <section id="welcome">
+    <div class="eyebrow">极简审计 · 本地工具 · 官方联网</div>
+    <h1>想清楚，<br>再动手算。</h1>
+    <p>Chat 支持按需联网；Work 支持任务拆解、联网取证与本地精确计算（公式、统计、单位、日期）。</p>
+    <div class="suggestions">
+      <button data-prompt="计算 (18500 * 0.135) + sqrt(2025)，并把结果从 MB 换算成 MiB。">本地精确计算 <span>↗</span></button>
+      <button data-prompt="调研 DeepSeek 当前官方 API 的最新版本与定价，给出有来源的简短结论。">核查最新官方信息 <span>↗</span></button>
+    </div>
+  </section>
+
+  <section id="messages" aria-label="对话记录" aria-live="polite"></section>
+
+  <section id="taskPanel" hidden>
+    <div class="taskheading"><span>WORKSPACE</span><span id="taskStatus">准备开始</span></div>
+    <ol id="steps">
+      <li>01 拆解目标</li>
+      <li>02 联网取证</li>
+      <li>03 本地计算与交付</li>
+      <li>04 文本审查</li>
+    </ol>
+    <details id="planBox"><summary>任务计划</summary><pre id="planText"></pre></details>
+    <details id="toolsBox"><summary>本地工具调用记录</summary><pre id="toolsText"></pre></details>
+    <details id="reviewBox"><summary>审核记录 · 非独立事实核查</summary><pre id="reviewText"></pre></details>
+  </section>
+
+  <div class="composerWrap">
+    <form id="composer">
+      <label class="sr-only" for="prompt">你的问题或任务</label>
+      <textarea id="prompt" rows="2" placeholder="写下一个问题，或交给 Work 拆解与计算…" required maxlength="40000"></textarea>
+      <div class="composerActions">
+        <label class="toggle"><input id="web" type="checkbox" checked><span>联网</span></label>
+        <label class="toggle" id="localToolsWrap" hidden><input id="localTools" type="checkbox" checked><span>本地工具</span></label>
+        <span id="modeHint">由模型按需搜索</span>
+        <button id="stop" type="button" hidden>停止</button>
+        <button id="send" type="submit" aria-label="发送">发送 ↑</button>
+      </div>
+    </form>
+    <div class="under">
+      <span id="status" role="status">Key 与对话仅在当前页面内存中保留</span>
+      <button id="export" class="quiet">导出 Markdown ↓</button>
+    </div>
+  </div>
+</main>
+
+<footer>
+  <span>本地仅 2 个直接 Rust 依赖 · 计算在本地执行</span>
+  <span>AI 生成内容，请核查重要结论。</span>
+</footer>
+
+<dialog id="settings">
+  <form method="dialog">
+    <div class="dialoghead">
+      <h2>连接你的 DeepSeek</h2>
+      <button class="quiet" value="close" aria-label="关闭">×</button>
+    </div>
+    <p>使用官方 API Key。Work 模式支持本地确定性计算（calc / stats / unit_convert / date_calc / text_metrics）。</p>
+    <label for="key">API Key</label>
+    <input id="key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-…">
+    <label for="model">模型</label>
+    <select id="model">
+      <option value="deepseek-flash">DeepSeek Flash (V4.1-Flash) · 支持官方联网与本地工具</option>
+      <option value="deepseek-v4-pro">DeepSeek V4 Pro · 支持本地工具（不支持官方联网）</option>
+    </select>
+    <label for="effort">思考强度</label>
+    <select id="effort">
+      <option value="none">关闭 · 更快</option>
+      <option value="low">Low</option>
+      <option value="high" selected>High</option>
+      <option value="max">Max · 更多时间与用量</option>
+    </select>
+    <label for="budget">单次执行输出预算（含思考）</label>
+    <select id="budget">
+      <option value="8192">8,192 tokens</option>
+      <option value="16384" selected>16,384 tokens</option>
+      <option value="32768">32,768 tokens</option>
+      <option value="65536">65,536 tokens</option>
+    </select>
+    <div class="settingsActions">
+      <button id="discover" type="button" class="quiet">检测 Key / 查询模型</button>
+      <button value="save">完成</button>
+    </div>
+    <pre id="modelInfo"></pre>
+    <p class="fine">固定连接 api.deepseek.com。无第三方中转、云端会话库或自动重试。刷新页面后需重新输入 Key。</p>
+  </form>
+</dialog>
+</body>
+</html>
