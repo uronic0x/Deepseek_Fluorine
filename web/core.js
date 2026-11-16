@@ -8,6 +8,30 @@ export function safeUrl(raw) {
   }
 }
 
+export function buildLatestReminder(date = new Date()) {
+  const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  const weekday = days[date.getDay()];
+  return `${y}-${m}-${d},${weekday},Local,Web,Chinese`;
+}
+
+export function formatServerToolEvent(event) {
+  if (!event || event.type !== 'call_started') return null;
+  const action = event.call?.action || {};
+  if (action.type === 'search' && Array.isArray(action.queries) && action.queries.length) {
+    return `正在联网搜索：${action.queries.slice(0, 2).join(' · ')}`;
+  }
+  if ((action.type === 'open_page' || action.type === 'read_link') && action.url) {
+    return `正在读取页面：${action.url}`;
+  }
+  if (action.type === 'find_in_page' && action.pattern) {
+    return `正在页内查找：${action.pattern}`;
+  }
+  return `正在联网：${action.type || '检索'}`;
+}
+
 export function citationPoints(message) {
   const size = Array.from(message.content || '').length;
   return (message.annotations || [])
@@ -125,11 +149,12 @@ export function accumulator(onUpdate = () => {}) {
         throw error;
       }
       if (finish !== 'stop') {
-        throw new Error(
-          finish === 'length'
-            ? '输出预算耗尽，当前回复未完成。请提高预算后重试。'
-            : `异常结束状态：${finish}`
-        );
+        const reasonMap = {
+          length: '输出预算耗尽，当前回复未完成。请提高预算后重试。',
+          insufficient_system_resource: '上游推理资源暂时不足，请稍后手动重试。',
+          aborted: '上游生成过程被中断。',
+        };
+        throw new Error(reasonMap[finish] || `异常结束状态：${finish}`);
       }
       if (!message.content.trim()) throw new Error('上游未返回正文；不会将思考内容冒充答案。');
       return { message: structuredClone(message), usage, title };

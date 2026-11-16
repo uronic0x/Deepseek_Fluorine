@@ -1,4 +1,11 @@
-import { readCompletion, citationPoints, sourceList, usageText } from './core.js';
+import {
+  readCompletion,
+  citationPoints,
+  sourceList,
+  usageText,
+  buildLatestReminder,
+  formatServerToolEvent,
+} from './core.js';
 
 const $ = id => document.getElementById(id);
 let mode = 'chat';
@@ -94,7 +101,21 @@ function renderAnswer(target, raw) {
   target.append(document.createTextNode(chars.slice(start).join('')));
 }
 
+function clipText(s, max = 72) {
+  return s.length > max ? s.slice(0, max - 1) + '…' : s;
+}
+
 function extras(box, raw, usage, model) {
+  if (raw.reasoning_content?.trim()) {
+    const det = document.createElement('details');
+    det.className = 'thinking';
+    const sum = document.createElement('summary');
+    sum.textContent = '思考过程';
+    const pre = document.createElement('pre');
+    pre.textContent = raw.reasoning_content.trim();
+    det.append(sum, pre);
+    box.insertBefore(det, box.querySelector('.answer'));
+  }
   if (raw.local_tool_calls?.length) {
     const group = document.createElement('div');
     group.className = 'sources';
@@ -102,7 +123,8 @@ function extras(box, raw, usage, model) {
     for (const tc of raw.local_tool_calls) {
       const tag = document.createElement('span');
       tag.className = 'tool-badge';
-      tag.textContent = `${tc.name}(${tc.arguments}) → ${tc.result}`;
+      tag.title = `${tc.name}(${tc.arguments}) → ${tc.result}`;
+      tag.textContent = clipText(`${tc.name}(${tc.arguments}) → ${tc.result}`);
       group.append(tag);
     }
     box.append(group);
@@ -122,10 +144,28 @@ function extras(box, raw, usage, model) {
     }
     box.append(group);
   }
-  const info = document.createElement('div');
+  const metaRow = document.createElement('div');
+  metaRow.className = 'usageRow';
+  const info = document.createElement('span');
   info.className = 'usage';
   info.textContent = usageText(usage, model);
-  box.append(info);
+  const copyBtn = document.createElement('button');
+  copyBtn.type = 'button';
+  copyBtn.className = 'quiet copyBtn';
+  copyBtn.textContent = '复制';
+  copyBtn.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(raw.content || '');
+      copyBtn.textContent = '已复制';
+      setTimeout(() => {
+        copyBtn.textContent = '复制';
+      }, 1500);
+    } catch {
+      status('剪贴板写入失败，请手动选择复制。');
+    }
+  };
+  metaRow.append(info, copyBtn);
+  box.append(metaRow);
 }
 
 async function run(stage, messages, config, target, localTools = false) {
@@ -153,14 +193,15 @@ async function run(stage, messages, config, target, localTools = false) {
     });
     return await readCompletion(response, ({ message: raw, event, localEvent, thinking }) => {
       if (target) target.answer.textContent = raw.content;
+      const webStatus = formatServerToolEvent(event);
       if (localEvent?.type === 'call_started') {
-        progress.textContent = `本地计算：${localEvent.name}(${localEvent.arguments})`;
+        progress.textContent = `本地计算：${localEvent.name}(${clipText(localEvent.arguments || '', 48)})`;
         $('toolsText').textContent += `▶ ${localEvent.name}(${localEvent.arguments})\n`;
       } else if (localEvent?.type === 'call_completed') {
         progress.textContent = `已完成：${localEvent.name}`;
         $('toolsText').textContent += `✓ ${localEvent.result}\n\n`;
-      } else if (event?.type === 'call_started') {
-        progress.textContent = `正在联网：${event.call?.action?.type || '检索'}`;
+      } else if (webStatus) {
+        progress.textContent = webStatus;
       } else if (thinking) {
         progress.textContent = '正在思考…';
       } else if (raw.content) {
@@ -205,7 +246,7 @@ $('composer').onsubmit = async e => {
     status('先填入 API Key，再发送。');
     return;
   }
-  if (history.length > (mode === 'work' ? 72 : 78)) {
+  if (history.length > (mode === 'work' ? 105 : 114)) {
     status('会话已接近长度上限，请导出后新建会话。');
     return;
   }
@@ -215,7 +256,11 @@ $('composer').onsubmit = async e => {
   $('prompt').value = '';
   message('user', prompt);
 
-  const pending = [...structuredClone(history), { role: 'user', content: prompt }];
+  const pending = [
+    ...structuredClone(history),
+    { role: 'latest_reminder', content: buildLatestReminder() },
+    { role: 'user', content: prompt },
+  ];
   let target = null;
   let executionCommitted = false;
   const report = {

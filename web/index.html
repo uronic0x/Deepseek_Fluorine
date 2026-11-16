@@ -25,7 +25,7 @@
   <section id="welcome">
     <div class="eyebrow">极简审计 · 本地工具 · 官方联网</div>
     <h1>想清楚，<br>再动手算。</h1>
-    <p>Chat 支持按需联网；Work 支持任务拆解、联网取证与本地精确计算（公式、统计、单位、日期）。</p>
+    <p>Chat 支持按需联网；Work 支持任务拆解、联网取证与本地确定性工具（公式、统计、单位、日期/工作日、JSON、CSV、Diff、编码哈希）。</p>
     <div class="suggestions">
       <button data-prompt="计算 (18500 * 0.135) + sqrt(2025)，并把结果从 MB 换算成 MiB。">本地精确计算 <span>↗</span></button>
       <button data-prompt="调研 DeepSeek 当前官方 API 的最新版本与定价，给出有来源的简短结论。">核查最新官方信息 <span>↗</span></button>
@@ -67,7 +67,7 @@
 </main>
 
 <footer>
-  <span>本地仅 2 个直接 Rust 依赖 · 计算在本地执行</span>
+  <span>本地仅 2 个直接 Rust 依赖 · 9 项确定性工具本地执行</span>
   <span>AI 生成内容，请核查重要结论。</span>
 </footer>
 
@@ -77,13 +77,13 @@
       <h2>连接你的 DeepSeek</h2>
       <button class="quiet" value="close" aria-label="关闭">×</button>
     </div>
-    <p>使用官方 API Key。Work 模式支持本地确定性计算（calc / stats / unit_convert / date_calc / text_metrics）。</p>
+    <p>使用官方 API Key。Work 模式内置 9 项纯 Rust 本地工具（calc / stats / unit_convert / date_calc / text_metrics / json_query / csv_summary / text_diff / encode_hash）。</p>
     <label for="key">API Key</label>
     <input id="key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-…">
     <label for="model">模型</label>
     <select id="model">
-      <option value="deepseek-flash">DeepSeek Flash (V4.1-Flash) · 支持官方联网与本地工具</option>
-      <option value="deepseek-v4-pro">DeepSeek V4 Pro · 支持本地工具（不支持官方联网）</option>
+      <option value="deepseek-flash">DeepSeek Flash (V4.1-Flash-1017) · 支持官方联网与本地工具</option>
+      <option value="deepseek-v4-pro">DeepSeek V4 Pro (V4-Pro-0813) · 支持本地工具（不支持官方联网）</option>
     </select>
     <label for="effort">思考强度</label>
     <select id="effort">
@@ -98,6 +98,7 @@
       <option value="16384" selected>16,384 tokens</option>
       <option value="32768">32,768 tokens</option>
       <option value="65536">65,536 tokens</option>
+      <option value="131072">131,072 tokens (128K)</option>
     </select>
     <div class="settingsActions">
       <button id="discover" type="button" class="quiet">检测 Key / 查询模型</button>

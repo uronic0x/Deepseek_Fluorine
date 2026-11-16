@@ -1,11 +1,41 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { accumulator, citationPoints, estimateCostUsd, safeUrl, sourceList } from '../web/core.js';
+import {
+  accumulator,
+  buildLatestReminder,
+  citationPoints,
+  estimateCostUsd,
+  formatServerToolEvent,
+  safeUrl,
+  sourceList,
+} from '../web/core.js';
 
 test('safeUrl blocks javascript and credential URLs', () => {
   assert.equal(safeUrl('https://api-docs.deepseek.com/updates'), 'https://api-docs.deepseek.com/updates');
   assert.equal(safeUrl('javascript:alert(1)'), null);
   assert.equal(safeUrl('https://user:pass@example.com'), null);
+});
+
+test('buildLatestReminder formats date and weekday', () => {
+  const d = new Date(2026, 10, 17, 10, 0, 0); // 2026-11-17 Tuesday
+  assert.equal(buildLatestReminder(d), '2026-11-17,Tuesday,Local,Web,Chinese');
+});
+
+test('formatServerToolEvent formats search and open_page events', () => {
+  assert.equal(
+    formatServerToolEvent({
+      type: 'call_started',
+      call: { action: { type: 'search', queries: ['DeepSeek V4.1', 'pricing'] } },
+    }),
+    '正在联网搜索：DeepSeek V4.1 · pricing'
+  );
+  assert.equal(
+    formatServerToolEvent({
+      type: 'call_started',
+      call: { action: { type: 'open_page', url: 'https://api-docs.deepseek.com/' } },
+    }),
+    '正在读取页面：https://api-docs.deepseek.com/'
+  );
 });
 
 test('citationPoints uses Unicode code points', () => {
@@ -36,6 +66,15 @@ test('accumulator handles local_tool_calls and title', () => {
   assert.equal(res.title, '数学计算');
   assert.equal(res.message.local_tool_calls.length, 1);
   assert.equal(res.message.content, '结果是 14');
+});
+
+test('accumulator surfaces insufficient_system_resource clearly', () => {
+  const acc = accumulator();
+  acc.push({
+    choices: [{ delta: { content: 'partial' }, finish_reason: 'insufficient_system_resource' }],
+  });
+  acc.markDone();
+  assert.throws(() => acc.result(), /推理资源暂时不足/);
 });
 
 test('estimateCostUsd computes off-peak and peak rates', () => {

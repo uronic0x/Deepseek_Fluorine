@@ -181,11 +181,19 @@ class Integration(unittest.TestCase):
             **kw,
         }
 
-    def test_assets(self):
+    def test_assets_and_tools_catalog(self):
         for path in ["/", "/app.js", "/core.js", "/style.css"]:
             status, headers, _ = self.request("GET", path)
             self.assertEqual(status, 200)
             self.assertIn("frame-ancestors", headers["Content-Security-Policy"])
+        status, _, body = self.request("GET", "/api/tools")
+        self.assertEqual(status, 200)
+        tools = json.loads(body)["tools"]
+        names = {t["function"]["name"] for t in tools}
+        self.assertEqual(
+            names,
+            {"calc", "stats", "unit_convert", "date_calc", "text_metrics", "json_query", "csv_summary", "text_diff", "encode_hash"},
+        )
 
     def test_same_origin_and_host_guards(self):
         self.assertEqual(

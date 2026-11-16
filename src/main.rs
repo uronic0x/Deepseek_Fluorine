@@ -16,7 +16,7 @@ use std::thread;
 use std::time::Duration;
 
 const MAX_ACTIVE: usize = 4;
-const MAX_TOOL_ROUNDS: usize = 6;
+const MAX_TOOL_ROUNDS: usize = 8;
 
 fn reply_json(stream: &mut TcpStream, status: u16, body: &str) {
     write_response(
@@ -184,6 +184,27 @@ fn run_local_tool_loop(
             add_usage(&mut usage_acc, u);
         }
 
+        // Per DeepSeek API docs, non-streaming HTTP 200 can carry {"error": {...}, "usage": {...}}
+        if let Some(err_obj) = body.get("error") {
+            let err_msg = err_obj
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("上游生成失败；已发生的用量仍可能计费");
+            if !sse_started {
+                reply_error(stream, 502, "upstream_generation_error", err_msg);
+            } else {
+                let _ = write_sse_data(
+                    stream,
+                    &json!({
+                        "error": {"message": err_msg},
+                        "usage": usage_acc.to_json()
+                    })
+                    .to_string(),
+                );
+            }
+            return;
+        }
+
         if !sse_started {
             if start_sse(stream).is_err() {
                 return;
@@ -326,7 +347,7 @@ fn run_local_tool_loop(
     if sse_started {
         let _ = write_sse_data(
             stream,
-            &json!({"error":{"message":"本地工具调用轮次超过上限（6 轮）"}}).to_string(),
+            &json!({"error":{"message":"本地工具调用轮次超过上限（8 轮）"}}).to_string(),
         );
     }
 }
@@ -346,6 +367,10 @@ fn serve(mut stream: TcpStream, port: u16, agent: ureq::Agent, base: &str) {
     }
 
     if req.method == "GET" {
+        if req.path == "/api/tools" {
+            let body = json!({ "tools": tools::tool_definitions() }).to_string();
+            return reply_json(&mut stream, 200, &body);
+        }
         let (mime, content) = match req.path.as_str() {
             "/" | "/index.html" => ("text/html; charset=utf-8", include_str!("../web/index.html")),
             "/app.js" => ("text/javascript; charset=utf-8", include_str!("../web/app.js")),
