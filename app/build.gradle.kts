@@ -25,11 +25,8 @@ android {
     }
 
     signingConfigs {
-        create("debugConfig") {
-            storeFile = file("${rootDir}/debug.keystore")
-            storePassword = "android"
-            keyAlias = "androiddebugkey"
-            keyPassword = "android"
+        getByName("debug") {
+            // Use AGP's default debug keystore (auto-generated in ~/.android/debug.keystore).
         }
     }
 
@@ -43,7 +40,7 @@ android {
             )
         }
         debug {
-            signingConfig = signingConfigs.getByName("debugConfig")
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 

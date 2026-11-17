@@ -239,7 +239,9 @@ pub fn build_payload(input: ChatInput) -> Result<BuiltPayload, String> {
         || input.model == "deepseek-flash"
         || !KNOWN_MODELS.contains(&input.model.as_str());
     if input.web && allow_web {
-        tool_list.push(json!({ "type": "web_search" }));
+        // Official Chat Completions web tools: only `deepseek_web_search` /
+        // `deepseek_read_url` are recognized; `web_search` is rejected with 422.
+        tool_list.push(json!({ "type": "deepseek_web_search" }));
     }
     if input.local_tools {
         if let Value::Array(defs) = tools::tool_definitions(input.device_tools) {
@@ -289,7 +291,7 @@ mod tests {
         }))
         .unwrap();
         let flash_built = build_payload(parse_input(&flash_raw).unwrap()).unwrap();
-        assert_eq!(flash_built.body["tools"][0]["type"], "web_search");
+        assert_eq!(flash_built.body["tools"][0]["type"], "deepseek_web_search");
     }
 
     #[test]

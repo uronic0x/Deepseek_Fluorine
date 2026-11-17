@@ -57,7 +57,7 @@ class FluorineProtocolAndToolsTest {
         val flashPayload = KotlinNativeEngine.buildUpstreamPayload(flashReq)
         assertTrue(flashPayload.has("tools"))
         assertEquals(
-            "web_search",
+            "deepseek_web_search",
             flashPayload.getJSONArray("tools").getJSONObject(0).getString("type")
         )
     }
@@ -105,7 +105,7 @@ class FluorineProtocolAndToolsTest {
 
         val payload = KotlinNativeEngine.buildUpstreamPayload(workReq)
         val tools = payload.getJSONArray("tools")
-        // 1 web_search + 9 deterministic + 9 harness = 19 tools
+        // 1 deepseek_web_search + 9 deterministic + 9 harness = 19 tools
         assertEquals(19, tools.length())
 
         val msgs = payload.getJSONArray("messages")

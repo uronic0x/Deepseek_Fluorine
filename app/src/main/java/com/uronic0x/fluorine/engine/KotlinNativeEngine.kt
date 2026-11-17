@@ -166,7 +166,9 @@ object KotlinNativeEngine {
         val tools = JSONArray()
         val allowWebForModel = unlockWeb || model == "deepseek-flash" || !KNOWN_MODELS.contains(model)
         if (useWeb && allowWebForModel) {
-            tools.put(JSONObject().put("type", "web_search"))
+            // Official Chat Completions web tools: only `deepseek_web_search` /
+            // `deepseek_read_url` are recognized; `web_search` is rejected with 422.
+            tools.put(JSONObject().put("type", "deepseek_web_search"))
         }
         if (useLocalTools) {
             val detDecls = DeterministicTools.declarations()
