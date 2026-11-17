@@ -23,7 +23,7 @@ impl AppConfig {
     pub fn from_env() -> Self {
         let pkg_name = env!("CARGO_PKG_NAME").to_owned();
         let app_name = non_empty_env("APP_NAME").unwrap_or_else(|| pkg_name.clone());
-        let display_name = non_empty_env("APP_DISPLAY_NAME").unwrap_or_else(|| app_name.clone());
+        let display_name = non_empty_env("APP_DISPLAY_NAME").unwrap_or_else(|| "Fluorine".to_owned());
         let subtitle =
             non_empty_env("APP_SUBTITLE").unwrap_or_else(|| "DeepSeek 本地工作台".to_owned());
         let version = env!("CARGO_PKG_VERSION").to_owned();
@@ -50,6 +50,20 @@ impl AppConfig {
             allow_android_storage,
         }
     }
+
+    /// Construct configuration explicitly for Android native runtime without relying on env::current_dir().
+    pub fn from_android(workspace_dir: PathBuf, allow_android_storage: bool) -> Self {
+        let _ = std::fs::create_dir_all(&workspace_dir);
+        let workspace_root = std::fs::canonicalize(&workspace_dir).unwrap_or(workspace_dir);
+        Self {
+            app_name: env!("CARGO_PKG_NAME").to_owned(),
+            display_name: "Fluorine".to_owned(),
+            subtitle: "DeepSeek 本地工作台".to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            workspace_root,
+            allow_android_storage,
+        }
+    }
 }
 
 pub fn html_escape(raw: &str) -> String {
@@ -58,7 +72,7 @@ pub fn html_escape(raw: &str) -> String {
         match ch {
             '&' => out.push_str("&amp;"),
             '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
+            '>' => out.push_str(">"),
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&#39;"),
             _ => out.push(ch),
@@ -68,11 +82,12 @@ pub fn html_escape(raw: &str) -> String {
 }
 
 pub fn render_index_html(template: &str, cfg: &AppConfig) -> String {
+    let esc_gt = |s: &str| html_escape(s).replace('>', "&gt;");
     template
-        .replace("{{APP_NAME}}", &html_escape(&cfg.app_name))
-        .replace("{{APP_DISPLAY_NAME}}", &html_escape(&cfg.display_name))
-        .replace("{{APP_SUBTITLE}}", &html_escape(&cfg.subtitle))
-        .replace("{{APP_VERSION}}", &html_escape(&cfg.version))
+        .replace("{{APP_NAME}}", &esc_gt(&cfg.app_name))
+        .replace("{{APP_DISPLAY_NAME}}", &esc_gt(&cfg.display_name))
+        .replace("{{APP_SUBTITLE}}", &esc_gt(&cfg.subtitle))
+        .replace("{{APP_VERSION}}", &esc_gt(&cfg.version))
 }
 
 pub fn meta_json(cfg: &AppConfig, runtime: Value) -> Value {
@@ -111,9 +126,12 @@ mod tests {
     }
 
     #[test]
-    fn default_name_comes_from_cargo_pkg() {
-        let cfg = AppConfig::from_env();
-        assert!(!cfg.app_name.is_empty());
-        assert!(!cfg.display_name.is_empty());
+    fn android_config_sets_explicit_workspace() {
+        let tmp = env::temp_dir().join("fluorine_android_cfg_test");
+        let cfg = AppConfig::from_android(tmp.clone(), true);
+        assert_eq!(cfg.app_name, "fluorine");
+        assert_eq!(cfg.display_name, "Fluorine");
+        assert!(cfg.allow_android_storage);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

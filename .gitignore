@@ -1,4 +1,13 @@
 /target
+/.gradle
+/build
+/app/build
+/.aistudio
+local.properties
+*.apk
+*.aab
+debug.keystore
+debug.keystore.base64
 *.swp
 .DS_Store
 __pycache__/
