@@ -768,7 +768,7 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
         pendingMessages.add(
             ProtocolMessage(
                 role = "latest_reminder",
-                content = CoreProtocol.buildLatestReminder(Date(), "Android")
+                content = CoreProtocol.buildLatestReminder(Date(), "App")
             )
         )
         pendingMessages.add(

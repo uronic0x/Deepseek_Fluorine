@@ -175,15 +175,15 @@ object CoreProtocol {
         return slug.ifEmpty { "app" }
     }
 
-    fun buildLatestReminder(date: Date = Date(), platform: String = "Android"): String {
+    fun buildLatestReminder(date: Date = Date(), platform: String = "App"): String {
         val cal = Calendar.getInstance()
         cal.time = date
-        val days = arrayOf("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")
+        val days = arrayOf("星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六")
         val y = cal.get(Calendar.YEAR)
         val m = (cal.get(Calendar.MONTH) + 1).toString().padStart(2, '0')
         val d = cal.get(Calendar.DAY_OF_MONTH).toString().padStart(2, '0')
         val weekday = days[cal.get(Calendar.DAY_OF_WEEK) - 1]
-        return "$y-$m-$d,$weekday,Local,$platform,Chinese"
+        return "$y-$m-$d,$weekday,Local,$platform,中文"
     }
 
     fun sanitizeHistoryMessage(

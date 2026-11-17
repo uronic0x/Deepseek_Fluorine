@@ -74,6 +74,23 @@ object KotlinNativeEngine {
         else -> "上游服务异常；本轮未自动重试"
     }
 
+    private fun readUpstreamErrorBody(conn: HttpsURLConnection, code: Int): String {
+        try {
+            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+            if (stream == null) return upstreamErrorMsg(code)
+            val bytes = stream.readNBytes(MAX_BODY_BYTES + 1)
+            if (bytes.size > MAX_BODY_BYTES) return upstreamErrorMsg(code)
+            val text = String(bytes, StandardCharsets.UTF_8).trim()
+            if (text.isBlank()) return upstreamErrorMsg(code)
+            val obj = try { JSONObject(text) } catch (_: Exception) { null }
+            val msg = obj?.optJSONObject("error")?.optString("message")?.takeIf { it.isNotBlank() }
+            if (msg != null) return msg
+            return if (text.length <= 512) text else upstreamErrorMsg(code)
+        } catch (_: Exception) {
+            return upstreamErrorMsg(code)
+        }
+    }
+
     fun fetchModelsJson(apiKey: String): String {
         val auth = validateApiKey(apiKey).getOrElse { e ->
             return JSONObject().put(
@@ -94,7 +111,7 @@ object KotlinNativeEngine {
             if (code !in 200..299) {
                 return JSONObject().put(
                     "error",
-                    JSONObject().put("code", "upstream_error").put("message", upstreamErrorMsg(code))
+                    JSONObject().put("code", "upstream_error").put("message", readUpstreamErrorBody(conn, code))
                 ).toString()
             }
             val bytes = conn.inputStream.readNBytes(MAX_BODY_BYTES + 1)
@@ -290,7 +307,6 @@ object KotlinNativeEngine {
             body.put("tool_choice", "auto")
         } else {
             body.put("stream_options", JSONObject().put("include_usage", true))
-            body.put("safety_check", JSONObject().put("level", "high"))
             if (useWebTools) {
                 body.put(
                     "tools",
@@ -375,7 +391,7 @@ object KotlinNativeEngine {
                 callback.onEvent(
                     JSONObject().put(
                         "error",
-                        JSONObject().put("code", "upstream_error").put("message", upstreamErrorMsg(code))
+                        JSONObject().put("code", "upstream_error").put("message", readUpstreamErrorBody(conn, code))
                     ).toString()
                 )
                 return
@@ -477,7 +493,7 @@ object KotlinNativeEngine {
                 val code = conn.responseCode
                 if (code !in 200..299) {
                     callback.onEvent(
-                        JSONObject().put("error", JSONObject().put("message", upstreamErrorMsg(code))).toString()
+                        JSONObject().put("error", JSONObject().put("message", readUpstreamErrorBody(conn, code))).toString()
                     )
                     return
                 }

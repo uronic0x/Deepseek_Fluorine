@@ -226,7 +226,6 @@ pub fn build_payload(i: ChatInput) -> Result<BuiltPayload, String> {
         body["tool_choice"] = json!("auto");
     } else {
         body["stream_options"] = json!({"include_usage": true});
-        body["safety_check"] = json!({"level": "high"});
         if use_web_tools {
             body["tools"] = json!([
                 {"type": "deepseek_web_search"},

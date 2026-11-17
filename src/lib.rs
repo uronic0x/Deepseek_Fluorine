@@ -83,6 +83,35 @@ pub fn upstream_error_msg(code: u16) -> &'static str {
     }
 }
 
+/// Read the real upstream error body so the exact rejection reason is visible.
+fn read_upstream_error_body(
+    upstream: &mut ureq::http::Response<ureq::Body>,
+    code: u16,
+) -> String {
+    let mut raw = Vec::new();
+    if upstream
+        .body_mut()
+        .as_reader()
+        .take(MAX_BODY as u64 + 1)
+        .read_to_end(&mut raw)
+        .is_ok()
+        && raw.len() <= MAX_BODY
+    {
+        if let Ok(v) = serde_json::from_slice::<Value>(&raw) {
+            if let Some(msg) = v.pointer("/error/message").and_then(Value::as_str) {
+                if !msg.is_empty() {
+                    return msg.to_owned();
+                }
+            }
+        }
+        let s = String::from_utf8_lossy(&raw).into_owned();
+        if !s.is_empty() && s.len() <= 512 {
+            return s;
+        }
+    }
+    upstream_error_msg(code).to_owned()
+}
+
 pub fn build_http_agent() -> ureq::Agent {
     let config = ureq::Agent::config_builder()
         .http_status_as_error(false)
@@ -214,7 +243,7 @@ pub fn execute_chat_stream(
         return;
     }
 
-    let upstream = match agent
+    let mut upstream = match agent
         .post(&format!("{base}/chat/completions"))
         .header("Authorization", &authorization)
         .header("Content-Type", "application/json")
@@ -232,8 +261,9 @@ pub fn execute_chat_stream(
 
     let code = upstream.status().as_u16();
     if !(200..300).contains(&code) {
+        let detail = read_upstream_error_body(&mut upstream, code);
         let _ = sink.send_event(
-            &json!({"error": {"code": "upstream_error", "message": upstream_error_msg(code)}}).to_string(),
+            &json!({"error": {"code": "upstream_error", "message": detail}}).to_string(),
         );
         return;
     }
@@ -321,7 +351,8 @@ fn run_local_tool_loop_sink(
 
         let code = upstream.status().as_u16();
         if !(200..300).contains(&code) {
-            let _ = sink.send_event(&json!({"error": {"message": upstream_error_msg(code)}}).to_string());
+            let detail = read_upstream_error_body(&mut upstream, code);
+            let _ = sink.send_event(&json!({"error": {"message": detail}}).to_string());
             return;
         }
 
