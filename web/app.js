@@ -95,13 +95,6 @@ $('web').onchange = () => {
   }
 };
 
-for (const button of document.querySelectorAll('[data-prompt]')) {
-  button.onclick = () => {
-    $('prompt').value = button.dataset.prompt;
-    $('prompt').focus();
-  };
-}
-
 function lock(value) {
   busy = value;
   for (const id of [
