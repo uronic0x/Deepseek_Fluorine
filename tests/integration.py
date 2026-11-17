@@ -1,4 +1,5 @@
-"""Real Rust HTTP server + local fake upstream. Tests Chat SSE proxy & Work local tool loop."""
+"""Real Rust HTTP server + local fake upstream. Tests Chat SSE proxy, dynamic app metadata & Work local harness loop."""
+
 import http.client
 import http.server
 import json
@@ -6,12 +7,18 @@ import os
 import pathlib
 import socket
 import subprocess
+import tempfile
 import threading
 import time
+import tomllib
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+with open(ROOT / "Cargo.toml", "rb") as f:
+    PKG_NAME = tomllib.load(f)["package"]["name"]
+
 SEEN = []
+
 SSE = (
     ": keep-alive\n\n"
     + "data: "
@@ -127,13 +134,18 @@ class Integration(unittest.TestCase):
         cls.up = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Fake)
         threading.Thread(target=cls.up.serve_forever, daemon=True).start()
         cls.port = free_port()
+        cls.workspace = tempfile.mkdtemp(prefix="harness_int_")
         env = {
             **os.environ,
             "PORT": str(cls.port),
+            "APP_NAME": "custom-harness",
+            "APP_DISPLAY_NAME": "CustomHarness",
+            "APP_SUBTITLE": "Dynamic Bench",
+            "WORKSPACE_DIR": cls.workspace,
             "DEEPSEEK_TEST_BASE": f"http://127.0.0.1:{cls.up.server_port}",
         }
         cls.proc = subprocess.Popen(
-            [str(ROOT / "target/debug/qingming")],
+            [str(ROOT / "target/debug" / PKG_NAME)],
             env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -175,11 +187,30 @@ class Integration(unittest.TestCase):
             "model": "deepseek-flash",
             "web": True,
             "local_tools": False,
+            "device_tools": False,
             "effort": "high",
             "max_tokens": 16384,
             "messages": [{"role": "user", "content": "hi"}],
             **kw,
         }
+
+    def test_dynamic_app_name_and_meta(self):
+        status, _, body = self.request("GET", "/health")
+        self.assertEqual(status, 200)
+        health = json.loads(body)
+        self.assertEqual(health["app"], "custom-harness")
+        self.assertEqual(health["display_name"], "CustomHarness")
+
+        status, _, meta_body = self.request("GET", "/api/meta")
+        self.assertEqual(status, 200)
+        meta = json.loads(meta_body)
+        self.assertEqual(meta["app_name"], "custom-harness")
+        self.assertEqual(meta["subtitle"], "Dynamic Bench")
+
+        status, _, html = self.request("GET", "/")
+        self.assertEqual(status, 200)
+        self.assertIn("CustomHarness", html)
+        self.assertIn("Dynamic Bench", html)
 
     def test_assets_and_tools_catalog(self):
         for path in ["/", "/app.js", "/core.js", "/style.css"]:
@@ -192,7 +223,27 @@ class Integration(unittest.TestCase):
         names = {t["function"]["name"] for t in tools}
         self.assertEqual(
             names,
-            {"calc", "stats", "unit_convert", "date_calc", "text_metrics", "json_query", "csv_summary", "text_diff", "encode_hash"},
+            {
+                "calc",
+                "stats",
+                "unit_convert",
+                "date_calc",
+                "text_metrics",
+                "json_query",
+                "csv_summary",
+                "text_diff",
+                "encode_hash",
+                "device_probe",
+                "fs_list",
+                "fs_read",
+                "fs_search",
+                "git_inspect",
+                "fs_write",
+                "fs_edit",
+                "termux_device",
+                "android_ui",
+                "shell_exec",
+            },
         )
 
     def test_same_origin_and_host_guards(self):
@@ -206,7 +257,7 @@ class Integration(unittest.TestCase):
         status, _, body = self.request(
             "POST",
             "/api/chat",
-            self.payload(stage="execute", local_tools=True, model="deepseek-v4-pro"),
+            self.payload(stage="execute", local_tools=True, device_tools=True, model="deepseek-v4-pro"),
         )
         self.assertEqual(status, 200)
         self.assertIn("计算结果为 20", body)

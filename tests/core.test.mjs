@@ -7,6 +7,8 @@ import {
   estimateCostUsd,
   formatServerToolEvent,
   safeUrl,
+  sanitizeHistoryMessage,
+  slugifyAppName,
   sourceList,
 } from '../web/core.js';
 
@@ -16,9 +18,33 @@ test('safeUrl blocks javascript and credential URLs', () => {
   assert.equal(safeUrl('https://user:pass@example.com'), null);
 });
 
-test('buildLatestReminder formats date and weekday', () => {
+test('buildLatestReminder formats date, weekday, and platform', () => {
   const d = new Date(2026, 10, 17, 10, 0, 0); // 2026-11-17 Tuesday
   assert.equal(buildLatestReminder(d), '2026-11-17,Tuesday,Local,Web,Chinese');
+  assert.equal(buildLatestReminder(d, 'Android'), '2026-11-17,Tuesday,Local,Android,Chinese');
+});
+
+test('slugifyAppName sanitizes app names for filenames', () => {
+  assert.equal(slugifyAppName('My Harness App'), 'my-harness-app');
+  assert.equal(slugifyAppName('澄明'), 'app');
+});
+
+test('sanitizeHistoryMessage strips response-only metadata and conditional server_tool_calls', () => {
+  const msg = {
+    role: 'assistant',
+    content: 'answer',
+    reasoning_content: 'hidden cot',
+    annotations: [{ type: 'url_citation' }],
+    local_tool_calls: [{ name: 'calc' }],
+    server_tool_calls: [{ index: 0, calls: [] }],
+  };
+  const stripped = sanitizeHistoryMessage(msg, { keepServerToolCalls: false });
+  assert.deepEqual(stripped, { role: 'assistant', content: 'answer' });
+
+  const keptWeb = sanitizeHistoryMessage(msg, { keepServerToolCalls: true });
+  assert.equal(keptWeb.server_tool_calls.length, 1);
+  assert.equal(keptWeb.reasoning_content, undefined);
+  assert.equal(keptWeb.annotations, undefined);
 });
 
 test('formatServerToolEvent formats search and open_page events', () => {
@@ -46,6 +72,33 @@ test('citationPoints uses Unicode code points', () => {
   const pts = citationPoints(msg);
   assert.equal(pts.length, 1);
   assert.equal(pts[0].number, 1);
+});
+
+test('accumulator merges indexed server_tool_calls and preserves reasoning across step_reasoning_done', () => {
+  const acc = accumulator();
+  acc.push({
+    choices: [{
+      delta: {
+        reasoning_content: 'step 1',
+        server_tool_calls: [{ index: 0, calls: [{ kind: 'search' }] }],
+      },
+      server_tool_event: { type: 'step_reasoning_done' },
+    }],
+  });
+  acc.push({
+    choices: [{
+      delta: {
+        reasoning_content: 'step 2',
+        content: 'done',
+        server_tool_calls: [{ index: 1, calls: [{ kind: 'read_link' }] }],
+      },
+      finish_reason: 'stop',
+    }],
+  });
+  acc.markDone();
+  const res = acc.result();
+  assert.equal(res.message.server_tool_calls.length, 2);
+  assert.equal(res.message.reasoning_content, 'step 1\nstep 2');
 });
 
 test('accumulator handles local_tool_calls and title', () => {
