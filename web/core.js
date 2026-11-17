@@ -1,4 +1,5 @@
 // Dependency-free protocol layer shared by UI and Node tests.
+
 export function safeUrl(raw) {
   try {
     const u = new URL(raw);
@@ -8,13 +9,39 @@ export function safeUrl(raw) {
   }
 }
 
-export function buildLatestReminder(date = new Date()) {
+export function slugifyAppName(name = 'app') {
+  const slug = String(name || 'app')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return slug || 'app';
+}
+
+export function buildLatestReminder(date = new Date(), platform = 'Web') {
   const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
   const y = date.getFullYear();
   const m = String(date.getMonth() + 1).padStart(2, '0');
   const d = String(date.getDate()).padStart(2, '0');
   const weekday = days[date.getDay()];
-  return `${y}-${m}-${d},${weekday},Local,Web,Chinese`;
+  return `${y}-${m}-${d},${weekday},Local,${platform},Chinese`;
+}
+
+export function sanitizeHistoryMessage(msg, { keepServerToolCalls = false } = {}) {
+  if (!msg || typeof msg !== 'object') return msg;
+  const out = {
+    role: msg.role,
+    content: typeof msg.content === 'string' ? msg.content : '',
+  };
+  if (
+    msg.role === 'assistant' &&
+    keepServerToolCalls &&
+    Array.isArray(msg.server_tool_calls) &&
+    msg.server_tool_calls.length
+  ) {
+    out.server_tool_calls = structuredClone(msg.server_tool_calls);
+  }
+  return out;
 }
 
 export function formatServerToolEvent(event) {
@@ -85,7 +112,6 @@ export function estimateCostUsd(model, u, date = new Date()) {
     model === 'deepseek-v4-pro'
       ? { hit: 0.022 * peak, miss: 0.66 * peak, out: 1.98 * peak }
       : { hit: 0.003 * peak, miss: 0.15 * peak, out: 0.6 * peak };
-
   const prompt = u.prompt_tokens ?? u.input_tokens ?? 0;
   const hit = u.prompt_cache_hit_tokens ?? u.cache_read_input_tokens ?? 0;
   const miss = u.prompt_cache_miss_tokens ?? Math.max(0, prompt - hit);
@@ -94,9 +120,26 @@ export function estimateCostUsd(model, u, date = new Date()) {
   const webCost =
     ((tools.tool_search ?? 0) + (tools.tool_image_search ?? 0) + (tools.tool_fetch ?? 0)) *
     0.00075;
-
   const tokenCost = (hit * rates.hit + miss * rates.miss + out * rates.out) / 1_000_000;
   return tokenCost + webCost;
+}
+
+function mergeServerToolCalls(existing, incoming) {
+  if (!Array.isArray(existing)) return structuredClone(incoming);
+  const byIndex = new Map();
+  const unindexed = [];
+  for (const item of existing) {
+    if (Number.isInteger(item?.index)) byIndex.set(item.index, item);
+    else unindexed.push(item);
+  }
+  for (const item of incoming) {
+    if (Number.isInteger(item?.index)) byIndex.set(item.index, item);
+    else unindexed.push(item);
+  }
+  const merged = [...byIndex.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([, v]) => v);
+  return [...merged, ...unindexed];
 }
 
 export function accumulator(onUpdate = () => {}) {
@@ -118,10 +161,25 @@ export function accumulator(onUpdate = () => {}) {
     if (typeof delta.content === 'string') message.content += delta.content;
     if (typeof delta.reasoning_content === 'string') message.reasoning_content += delta.reasoning_content;
     if (typeof delta.title === 'string' && delta.title) title = delta.title;
-    for (const key of ['server_tool_calls', 'annotations', 'local_tool_calls']) {
-      if (Array.isArray(delta[key])) message[key] = delta[key];
+    if (Array.isArray(delta.server_tool_calls)) {
+      message.server_tool_calls = mergeServerToolCalls(
+        message.server_tool_calls,
+        delta.server_tool_calls
+      );
     }
-    if (choice.server_tool_event?.type === 'step_reasoning_done') message.reasoning_content = '';
+    if (Array.isArray(delta.annotations)) {
+      message.annotations = [...(message.annotations || []), ...delta.annotations];
+    }
+    if (Array.isArray(delta.local_tool_calls)) {
+      message.local_tool_calls = delta.local_tool_calls;
+    }
+    if (
+      choice.server_tool_event?.type === 'step_reasoning_done' &&
+      message.reasoning_content &&
+      !message.reasoning_content.endsWith('\n')
+    ) {
+      message.reasoning_content += '\n';
+    }
     if (choice.finish_reason) finish = choice.finish_reason;
     if (message.content.length + message.reasoning_content.length > 2 * 1024 * 1024) {
       throw new Error('单条回复过大，已停止接收。');

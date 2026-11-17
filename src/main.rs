@@ -1,7 +1,10 @@
+mod config;
+mod harness;
 mod http;
 mod policy;
 mod tools;
 
+use config::AppConfig;
 use http::{pipe_sse, read_request, start_sse, write_response, write_sse_data, HttpRequest, MAX_BODY};
 use policy::{build_payload, parse_input};
 use serde_json::{json, Value};
@@ -16,7 +19,7 @@ use std::thread;
 use std::time::Duration;
 
 const MAX_ACTIVE: usize = 4;
-const MAX_TOOL_ROUNDS: usize = 8;
+const MAX_TOOL_ROUNDS: usize = 20;
 
 fn reply_json(stream: &mut TcpStream, status: u16, body: &str) {
     write_response(
@@ -104,19 +107,23 @@ fn run_local_tool_loop(
     agent: &ureq::Agent,
     base: &str,
     authorization: &str,
+    cfg: &AppConfig,
+    allow_device_tools: bool,
     mut payload: Value,
 ) {
     let mut usage_acc = UsageAcc::default();
     let mut tool_log: Vec<Value> = Vec::new();
     let mut sse_started = false;
 
-    for _round in 0..MAX_TOOL_ROUNDS {
+    for round in 0..MAX_TOOL_ROUNDS {
+        if round + 1 == MAX_TOOL_ROUNDS {
+            payload["tool_choice"] = json!("none");
+        }
         let resp = agent
             .post(&format!("{base}/chat/completions"))
             .header("Authorization", authorization)
             .header("Content-Type", "application/json")
             .send(payload.to_string());
-
         let mut upstream = match resp {
             Ok(v) => v,
             Err(_) => {
@@ -235,6 +242,19 @@ fn run_local_tool_loop(
             .unwrap_or_default();
 
         if finish_reason == "tool_calls" && !tool_calls.is_empty() {
+            let _ = write_sse_data(
+                stream,
+                &json!({
+                    "choices": [{"delta": {}}],
+                    "local_tool_event": {
+                        "type": "round_started",
+                        "round": round + 1,
+                        "max_rounds": MAX_TOOL_ROUNDS,
+                    }
+                })
+                .to_string(),
+            );
+
             // Preserve reasoning_content + tool_calls on the assistant message per DeepSeek docs.
             let mut assistant_msg = json!({
                 "role": "assistant",
@@ -275,7 +295,7 @@ fn run_local_tool_loop(
                     .to_string(),
                 );
 
-                let result = tools::execute_tool(fn_name, fn_args);
+                let result = tools::execute_tool(fn_name, fn_args, cfg, allow_device_tools);
                 tool_log.push(json!({
                     "id": tc_id,
                     "name": fn_name,
@@ -347,12 +367,13 @@ fn run_local_tool_loop(
     if sse_started {
         let _ = write_sse_data(
             stream,
-            &json!({"error":{"message":"本地工具调用轮次超过上限（8 轮）"}}).to_string(),
+            &json!({"error":{"message": format!("本地工具调用轮次超过上限（{MAX_TOOL_ROUNDS} 轮）")}})
+                .to_string(),
         );
     }
 }
 
-fn serve(mut stream: TcpStream, port: u16, agent: ureq::Agent, base: &str) {
+fn serve(mut stream: TcpStream, port: u16, agent: ureq::Agent, base: &str, cfg: &AppConfig) {
     let req = match read_request(&mut stream) {
         Ok(r) => r,
         Err("body_limit") => {
@@ -360,44 +381,81 @@ fn serve(mut stream: TcpStream, port: u16, agent: ureq::Agent, base: &str) {
         }
         Err(_) => return reply_error(&mut stream, 400, "bad_request", "无效的 HTTP 请求"),
     };
-
     let host = req.header("Host");
     if host != format!("127.0.0.1:{port}") && host != format!("localhost:{port}") {
         return reply_error(&mut stream, 403, "host_denied", "仅允许本地地址");
     }
 
     if req.method == "GET" {
-        if req.path == "/api/tools" {
-            let body = json!({ "tools": tools::tool_definitions() }).to_string();
-            return reply_json(&mut stream, 200, &body);
-        }
-        let (mime, content) = match req.path.as_str() {
-            "/" | "/index.html" => ("text/html; charset=utf-8", include_str!("../web/index.html")),
-            "/app.js" => ("text/javascript; charset=utf-8", include_str!("../web/app.js")),
-            "/core.js" => ("text/javascript; charset=utf-8", include_str!("../web/core.js")),
-            "/style.css" => ("text/css; charset=utf-8", include_str!("../web/style.css")),
-            "/health" => ("application/json", "{\"ok\":true,\"app\":\"qingming\"}"),
+        match req.path.as_str() {
+            "/api/tools" => {
+                let body = json!({ "tools": tools::tool_definitions(true) }).to_string();
+                return reply_json(&mut stream, 200, &body);
+            }
+            "/api/meta" => {
+                let runtime = harness::probe_runtime_summary(cfg);
+                let body = config::meta_json(cfg, runtime).to_string();
+                return reply_json(&mut stream, 200, &body);
+            }
+            "/health" => {
+                let body = json!({
+                    "ok": true,
+                    "app": cfg.app_name,
+                    "display_name": cfg.display_name,
+                    "version": cfg.version,
+                })
+                .to_string();
+                return reply_json(&mut stream, 200, &body);
+            }
+            "/" | "/index.html" => {
+                let rendered = config::render_index_html(include_str!("../web/index.html"), cfg);
+                return write_response(
+                    &mut stream,
+                    200,
+                    "text/html; charset=utf-8",
+                    rendered.as_bytes(),
+                );
+            }
+            "/app.js" => {
+                return write_response(
+                    &mut stream,
+                    200,
+                    "text/javascript; charset=utf-8",
+                    include_str!("../web/app.js").as_bytes(),
+                );
+            }
+            "/core.js" => {
+                return write_response(
+                    &mut stream,
+                    200,
+                    "text/javascript; charset=utf-8",
+                    include_str!("../web/core.js").as_bytes(),
+                );
+            }
+            "/style.css" => {
+                return write_response(
+                    &mut stream,
+                    200,
+                    "text/css; charset=utf-8",
+                    include_str!("../web/style.css").as_bytes(),
+                );
+            }
             _ => return reply_error(&mut stream, 404, "not_found", "没有这个接口"),
-        };
-        return write_response(&mut stream, 200, mime, content.as_bytes());
+        }
     }
 
     if req.method != "POST" {
         return reply_error(&mut stream, 405, "method_not_allowed", "仅支持 GET / POST");
     }
-
     if req.header("Origin") != format!("http://{host}") {
         return reply_error(&mut stream, 403, "origin_denied", "仅接受同源页面请求");
     }
-
     if req.path != "/api/chat" && req.path != "/api/models" {
         return reply_error(&mut stream, 404, "not_found", "没有这个接口");
     }
-
     if !req.header("Content-Type").starts_with("application/json") {
         return reply_error(&mut stream, 415, "content_type", "需要 JSON 请求");
     }
-
     let authorization = match auth_header(&req) {
         Ok(v) => v,
         Err(m) => return reply_error(&mut stream, 401, "key_required", m),
@@ -441,13 +499,21 @@ fn serve(mut stream: TcpStream, port: u16, agent: ureq::Agent, base: &str) {
         Ok(v) => v,
         Err(m) => return reply_error(&mut stream, 400, "invalid_json", &m),
     };
-    let (payload, is_local_loop) = match build_payload(input) {
+    let built = match build_payload(input) {
         Ok(v) => v,
         Err(m) => return reply_error(&mut stream, 400, "invalid_request", &m),
     };
 
-    if is_local_loop {
-        run_local_tool_loop(&mut stream, &agent, base, &authorization, payload);
+    if built.use_local_tools {
+        run_local_tool_loop(
+            &mut stream,
+            &agent,
+            base,
+            &authorization,
+            cfg,
+            built.allow_device_tools,
+            built.body,
+        );
         return;
     }
 
@@ -455,7 +521,7 @@ fn serve(mut stream: TcpStream, port: u16, agent: ureq::Agent, base: &str) {
         .post(&format!("{base}/chat/completions"))
         .header("Authorization", &authorization)
         .header("Content-Type", "application/json")
-        .send(payload.to_string())
+        .send(built.body.to_string())
     {
         Ok(v) => v,
         Err(_) => {
@@ -472,7 +538,6 @@ fn serve(mut stream: TcpStream, port: u16, agent: ureq::Agent, base: &str) {
     if !(200..300).contains(&code) {
         return reply_error(&mut stream, code, "upstream_error", upstream_error_msg(code));
     }
-
     let mime = upstream
         .headers()
         .get("content-type")
@@ -481,11 +546,11 @@ fn serve(mut stream: TcpStream, port: u16, agent: ureq::Agent, base: &str) {
     if !mime.starts_with("text/event-stream") {
         return reply_error(&mut stream, 502, "expected_sse", "上游没有返回事件流");
     }
-
     pipe_sse(&mut stream, upstream.into_body().into_reader());
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let cfg = Arc::new(AppConfig::from_env());
     let port: u16 = env::var("PORT").unwrap_or_else(|_| "8787".into()).parse()?;
     if port == 0 {
         return Err("PORT must be nonzero".into());
@@ -501,7 +566,6 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     } else {
         "https://api.deepseek.com".into()
     };
-
     let config = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .max_redirects(0)
@@ -511,8 +575,12 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .build();
     let agent: ureq::Agent = config.into();
     let listener = TcpListener::bind(("127.0.0.1", port))?;
-    println!("qingming (澄明): http://127.0.0.1:{port}");
-
+    println!(
+        "{} ({}): http://127.0.0.1:{port} [workspace: {}]",
+        cfg.display_name,
+        cfg.app_name,
+        cfg.workspace_root.display()
+    );
     let active = Arc::new(AtomicUsize::new(0));
     for conn in listener.incoming() {
         let mut stream = match conn {
@@ -526,6 +594,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
         let a = agent.clone();
         let b = base.clone();
+        let c = Arc::clone(&cfg);
         let count = active.clone();
         thread::spawn(move || {
             struct Guard(Arc<AtomicUsize>);
@@ -535,7 +604,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 }
             }
             let _guard = Guard(count);
-            serve(stream, port, a, &b);
+            serve(stream, port, a, &b, &c);
         });
     }
     Ok(())

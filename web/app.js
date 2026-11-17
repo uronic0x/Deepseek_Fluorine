@@ -5,9 +5,19 @@ import {
   usageText,
   buildLatestReminder,
   formatServerToolEvent,
+  sanitizeHistoryMessage,
+  slugifyAppName,
 } from './core.js';
 
 const $ = id => document.getElementById(id);
+
+const appMeta = {
+  appName: document.body?.dataset?.appName || 'app',
+  displayName: document.body?.dataset?.displayName || document.body?.dataset?.appName || 'App',
+  subtitle: document.body?.dataset?.subtitle || 'DeepSeek 本地工作台',
+  runtime: null,
+};
+
 let mode = 'chat';
 let history = [];
 let reports = [];
@@ -17,32 +27,67 @@ let busy = false;
 function status(t) {
   $('status').textContent = t;
 }
+
 function keyState() {
   $('keyState').textContent = $('key').value.trim() ? '已填 Key' : '未连接';
 }
+
+function applyAppMeta() {
+  $('brandName').textContent = appMeta.displayName;
+  if (!history.length) {
+    $('convTitle').textContent = appMeta.subtitle;
+  }
+  document.title = `${appMeta.displayName} · ${appMeta.subtitle}`;
+}
+
+async function loadMeta() {
+  try {
+    const r = await fetch('/api/meta');
+    if (!r.ok) return;
+    const m = await r.json();
+    if (m.app_name) appMeta.appName = m.app_name;
+    if (m.display_name) appMeta.displayName = m.display_name;
+    if (m.subtitle) appMeta.subtitle = m.subtitle;
+    appMeta.runtime = m.runtime || null;
+    applyAppMeta();
+  } catch {}
+}
+
+applyAppMeta();
+loadMeta();
+
 $('settingsOpen').onclick = () => $('settings').showModal();
 $('key').addEventListener('input', keyState);
+
+function syncWorkToggles() {
+  const isWork = mode === 'work';
+  $('localToolsWrap').hidden = !isWork;
+  $('deviceToolsWrap').hidden = !isWork || !$('localTools').checked;
+}
 
 function setMode(m) {
   if (busy) return;
   mode = m;
   $('chatMode').setAttribute('aria-pressed', String(m === 'chat'));
   $('workMode').setAttribute('aria-pressed', String(m === 'work'));
-  $('localToolsWrap').hidden = m !== 'work';
+  syncWorkToggles();
   $('modeHint').textContent =
     m === 'work'
-      ? '计划 → 联网取证（可选）→ 本地计算与交付 → 审查'
+      ? '计划 → 联网取证（可选）→ 本地工具/设备执行 → 审查'
       : '由模型按需搜索';
 }
+
 $('chatMode').onclick = () => setMode('chat');
 $('workMode').onclick = () => setMode('work');
+$('localTools').onchange = syncWorkToggles;
 
 $('model').onchange = () => {
   if ($('model').value !== 'deepseek-flash') {
     $('web').checked = false;
-    status('Pro 已关闭官方联网（仍可使用 Work 本地工具计算）。');
+    status('Pro 已关闭官方联网（仍可使用 Work 本地工具与设备能力）。');
   }
 };
+
 $('web').onchange = () => {
   if ($('web').checked && $('model').value !== 'deepseek-flash') {
     $('web').checked = false;
@@ -59,7 +104,16 @@ for (const button of document.querySelectorAll('[data-prompt]')) {
 
 function lock(value) {
   busy = value;
-  for (const id of ['send', 'newChat', 'chatMode', 'workMode', 'web', 'localTools', 'settingsOpen']) {
+  for (const id of [
+    'send',
+    'newChat',
+    'chatMode',
+    'workMode',
+    'web',
+    'localTools',
+    'deviceTools',
+    'settingsOpen',
+  ]) {
     $(id).disabled = value;
   }
   $('stop').hidden = !value;
@@ -71,7 +125,7 @@ function message(role, text = '') {
   box.className = 'message ' + role;
   const label = document.createElement('div');
   label.className = 'label';
-  label.textContent = role === 'user' ? 'YOU' : role === 'error' ? '未完成' : '澄明';
+  label.textContent = role === 'user' ? 'YOU' : role === 'error' ? '未完成' : appMeta.displayName;
   const answer = document.createElement('div');
   answer.className = 'answer';
   answer.textContent = text;
@@ -119,7 +173,7 @@ function extras(box, raw, usage, model) {
   if (raw.local_tool_calls?.length) {
     const group = document.createElement('div');
     group.className = 'sources';
-    group.setAttribute('aria-label', '本地工具计算');
+    group.setAttribute('aria-label', '本地工具调用');
     for (const tc of raw.local_tool_calls) {
       const tag = document.createElement('span');
       tag.className = 'tool-badge';
@@ -186,6 +240,7 @@ async function run(stage, messages, config, target, localTools = false) {
         model: config.model,
         web: config.web,
         local_tools: localTools,
+        device_tools: localTools && config.deviceTools,
         effort: config.effort,
         max_tokens: stage === 'plan' ? 1024 : stage === 'review' ? 2048 : config.budget,
         messages,
@@ -194,12 +249,14 @@ async function run(stage, messages, config, target, localTools = false) {
     return await readCompletion(response, ({ message: raw, event, localEvent, thinking }) => {
       if (target) target.answer.textContent = raw.content;
       const webStatus = formatServerToolEvent(event);
-      if (localEvent?.type === 'call_started') {
-        progress.textContent = `本地计算：${localEvent.name}(${clipText(localEvent.arguments || '', 48)})`;
+      if (localEvent?.type === 'round_started') {
+        progress.textContent = `本地执行第 ${localEvent.round}/${localEvent.max_rounds} 轮…`;
+      } else if (localEvent?.type === 'call_started') {
+        progress.textContent = `调用本地工具：${localEvent.name}(${clipText(localEvent.arguments || '', 48)})`;
         $('toolsText').textContent += `▶ ${localEvent.name}(${localEvent.arguments})\n`;
       } else if (localEvent?.type === 'call_completed') {
         progress.textContent = `已完成：${localEvent.name}`;
-        $('toolsText').textContent += `✓ ${localEvent.result}\n\n`;
+        $('toolsText').textContent += `✓ ${clipText(localEvent.result || '', 600)}\n\n`;
       } else if (webStatus) {
         progress.textContent = webStatus;
       } else if (thinking) {
@@ -227,17 +284,21 @@ function step(n, text) {
   [...$('steps').children].forEach((el, i) => el.classList.toggle('active', i === n));
 }
 
+function currentPlatformLabel() {
+  return appMeta.runtime?.is_android ? 'Android' : 'Web';
+}
+
 $('composer').onsubmit = async e => {
   e.preventDefault();
   if (busy) return;
   const prompt = $('prompt').value.trim();
   if (!prompt) return;
-
   const config = {
     key: $('key').value.trim(),
     model: $('model').value,
     web: $('web').checked,
     localTools: $('localTools').checked,
+    deviceTools: $('deviceTools').checked,
     effort: $('effort').value,
     budget: Number($('budget').value),
   };
@@ -256,11 +317,20 @@ $('composer').onsubmit = async e => {
   $('prompt').value = '';
   message('user', prompt);
 
+  const sanitizedPrev = history.map(m =>
+    m.role === 'assistant'
+      ? sanitizeHistoryMessage(m, {
+          keepServerToolCalls: mode === 'chat' && config.web && config.model === 'deepseek-flash',
+        })
+      : m
+  );
+
   const pending = [
-    ...structuredClone(history),
-    { role: 'latest_reminder', content: buildLatestReminder() },
+    ...sanitizedPrev,
+    { role: 'latest_reminder', content: buildLatestReminder(new Date(), currentPlatformLabel()) },
     { role: 'user', content: prompt },
   ];
+
   let target = null;
   let executionCommitted = false;
   const report = {
@@ -270,6 +340,7 @@ $('composer').onsubmit = async e => {
     effort: config.effort,
     web: config.web,
     localTools: config.localTools,
+    deviceTools: config.deviceTools,
     plan: '',
     tools: '',
     review: '',
@@ -294,8 +365,11 @@ $('composer').onsubmit = async e => {
 
       let executeHistory = [
         ...pending,
-        { ...p.message },
-        { role: 'user', content: '请按这份计划执行最初任务，交付结果；不要把计划当成已完成的事实。' },
+        sanitizeHistoryMessage(p.message),
+        {
+          role: 'user',
+          content: '请按这份计划执行最初任务，交付结果；不要把计划当成已完成的事实。',
+        },
       ];
 
       if (config.web && config.localTools && config.model === 'deepseek-flash') {
@@ -303,21 +377,22 @@ $('composer').onsubmit = async e => {
         status('Work 2/4：联网收集一手资料');
         const res = await run('research', executeHistory, config, null, false);
         report.usage.push(res.usage);
+        // Strip server_tool_calls before transitioning into local custom-function execute loop
         executeHistory = [
           ...executeHistory,
-          { ...res.message },
+          sanitizeHistoryMessage(res.message, { keepServerToolCalls: false }),
           {
             role: 'user',
             content:
-              '请结合以上联网收集的事实，必要时调用本地工具进行精确计算或换算，生成最终交付正文。',
+              '请结合以上联网收集的事实，必要时调用本地计算或设备/工作区工具获取精确结果，生成最终交付正文。',
           },
         ];
       } else {
         step(1, config.web ? '并入执行阶段' : '跳过联网');
       }
 
-      step(2, config.localTools ? '本地计算与交付' : '执行与交付');
-      status(config.localTools ? 'Work：本地工具计算与生成正文' : 'Work：生成交付正文');
+      step(2, config.localTools ? '本地工具执行' : '执行与交付');
+      status(config.localTools ? 'Work：本地工具执行与生成正文' : 'Work：生成交付正文');
       if (config.localTools) $('toolsBox').open = true;
       target = message('assistant');
       const result = await run('execute', executeHistory, config, target, config.localTools);
@@ -325,12 +400,11 @@ $('composer').onsubmit = async e => {
       report.tools = $('toolsText').textContent;
       report.usage.push(result.usage);
 
-      // Strip local_tool_calls display array before storing in chat history
-      const cleanMsg = structuredClone(result.message);
-      delete cleanMsg.local_tool_calls;
-      history = [...executeHistory, cleanMsg];
+      history = [
+        ...executeHistory,
+        sanitizeHistoryMessage(result.message, { keepServerToolCalls: false }),
+      ];
       executionCommitted = true;
-
       renderAnswer(target.answer, result.message);
       extras(target.box, result.message, result.usage, config.model);
 
@@ -342,7 +416,8 @@ $('composer').onsubmit = async e => {
           ...history,
           {
             role: 'user',
-            content: '请检查刚才的交付物，指出计算、证据或完成度方面的缺口。不要假定计划已经全部完成。',
+            content:
+              '请检查刚才的交付物，指出计算、工具结果、证据或完成度方面的缺口。不要假定计划已经全部完成。',
           },
         ],
         config,
@@ -360,7 +435,12 @@ $('composer').onsubmit = async e => {
       if (result.title) $('convTitle').textContent = result.title;
       report.answer = result.message;
       report.usage.push(result.usage);
-      history = [...pending, result.message];
+      history = [
+        ...pending,
+        sanitizeHistoryMessage(result.message, {
+          keepServerToolCalls: config.web && config.model === 'deepseek-flash',
+        }),
+      ];
       executionCommitted = true;
       renderAnswer(target.answer, result.message);
       extras(target.box, result.message, result.usage, config.model);
@@ -394,11 +474,12 @@ $('composer').onsubmit = async e => {
 };
 
 $('stop').onclick = () => controller?.abort();
+
 $('newChat').onclick = () => {
   if (busy) return;
   history = [];
   reports = [];
-  $('convTitle').textContent = 'DeepSeek 本地工作台';
+  $('convTitle').textContent = appMeta.subtitle;
   $('messages').replaceChildren();
   $('taskPanel').hidden = true;
   $('welcome').hidden = false;
@@ -406,32 +487,46 @@ $('newChat').onclick = () => {
 };
 
 $('discover').onclick = async () => {
-  if (!$('key').value.trim()) {
-    $('modelInfo').textContent = '请先填写 Key。';
-    return;
-  }
   $('discover').disabled = true;
   const c = new AbortController();
   const timer = setTimeout(() => c.abort(), 20000);
+  const lines = [];
   try {
+    const metaResp = await fetch('/api/meta', { signal: c.signal });
+    if (metaResp.ok) {
+      const m = await metaResp.json();
+      appMeta.runtime = m.runtime || null;
+      const rt = m.runtime || {};
+      lines.push(
+        `本机 Harness：${rt.os || '?'}/${rt.arch || '?'} · Android=${!!rt.is_android} · Termux-API=${!!rt.termux_api_ready} · ADB=${!!rt.adb_ready} · Shizuku=${!!rt.shizuku_ready}`
+      );
+      lines.push(`工作区：${m.workspace || '-'}`);
+    }
+    const key = $('key').value.trim();
+    if (!key) {
+      lines.push('提示：尚未填写 API Key，跳过上游模型检测。');
+      $('modelInfo').textContent = lines.join('\n');
+      return;
+    }
     const r = await fetch('/api/models', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${$('key').value.trim()}`,
+        Authorization: `Bearer ${key}`,
       },
       body: '{}',
       signal: c.signal,
     });
     const v = await r.json();
     if (!r.ok) throw new Error(v.error?.message || `HTTP ${r.status}`);
-    $('modelInfo').textContent =
-      'Key 检测成功。上游返回：\n' +
-      (v.data || [])
-        .map(m => `${m.id} · context ${m.context_window ?? '1M'} · output ${m.max_output_tokens ?? '384K'}`)
-        .join('\n');
+    lines.push('Key 检测成功。上游返回：');
+    for (const m of v.data || []) {
+      lines.push(`${m.id} · context ${m.context_window ?? '1M'} · output ${m.max_output_tokens ?? '384K'}`);
+    }
+    $('modelInfo').textContent = lines.join('\n');
   } catch (err) {
-    $('modelInfo').textContent = err.name === 'AbortError' ? '检测超时，请稍后手动重试。' : err.message;
+    lines.push(err.name === 'AbortError' ? '检测超时，请稍后手动重试。' : err.message);
+    $('modelInfo').textContent = lines.join('\n');
   } finally {
     clearTimeout(timer);
     $('discover').disabled = false;
@@ -446,7 +541,7 @@ $('export').onclick = () => {
   const text = reports
     .map(
       r =>
-        `# ${r.prompt}\n\n模式：${r.mode} | 模型：${r.model} | effort：${r.effort} | 联网：${r.web} | 本地工具：${r.localTools}\n` +
+        `# ${r.prompt}\n\n模式：${r.mode} | 模型：${r.model} | effort：${r.effort} | 联网：${r.web} | 本地工具：${r.localTools} | 设备/Shell：${r.deviceTools}\n` +
         (r.plan ? `\n## 计划\n\n${r.plan}\n` : '') +
         (r.tools ? `\n## 本地工具记录\n\n\`\`\`\n${r.tools.trim()}\n\`\`\`\n` : '') +
         `\n## 交付物\n\n${r.answer?.content || ''}\n` +
@@ -460,7 +555,7 @@ $('export').onclick = () => {
   const url = URL.createObjectURL(new Blob([text], { type: 'text/markdown;charset=utf-8' }));
   const a = document.createElement('a');
   a.href = url;
-  a.download = 'qingming-report.md';
+  a.download = `${slugifyAppName(appMeta.appName)}-report.md`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 };

@@ -1,7 +1,9 @@
+use crate::config::AppConfig;
+use crate::harness;
 use serde_json::{json, Value};
 
-pub fn tool_definitions() -> Value {
-    json!([
+pub fn tool_definitions(include_device_tools: bool) -> Value {
+    let mut defs = json!([
         {
             "type": "function",
             "function": {
@@ -180,14 +182,24 @@ pub fn tool_definitions() -> Value {
                 }
             }
         }
-    ])
+    ]);
+    if let Some(arr) = defs.as_array_mut() {
+        arr.extend(harness::harness_tool_definitions(include_device_tools));
+    }
+    defs
 }
 
-pub fn execute_tool(name: &str, args_json: &str) -> String {
+pub fn execute_tool(name: &str, args_json: &str, cfg: &AppConfig, allow_device_tools: bool) -> String {
     let args: Value = match serde_json::from_str(args_json) {
         Ok(v) => v,
         Err(e) => return json!({ "error": format!("invalid JSON arguments: {e}") }).to_string(),
     };
+    if harness::is_device_control_tool(name) && !allow_device_tools {
+        return json!({
+            "error": format!("tool '{name}' requires device/shell control permission (enable device_tools)")
+        })
+        .to_string();
+    }
     let out = match name {
         "calc" => run_calc(&args),
         "stats" => run_stats(&args),
@@ -198,7 +210,7 @@ pub fn execute_tool(name: &str, args_json: &str) -> String {
         "csv_summary" => run_csv_summary(&args),
         "text_diff" => run_text_diff(&args),
         "encode_hash" => run_encode_hash(&args),
-        _ => Err(format!("unknown local tool: {name}")),
+        _ => harness::execute_harness_tool(name, &args, cfg),
     };
     match out {
         Ok(v) => v.to_string(),
@@ -1339,6 +1351,10 @@ fn run_encode_hash(args: &Value) -> Result<Value, String> {
 mod tests {
     use super::*;
 
+    fn test_cfg() -> AppConfig {
+        AppConfig::from_env()
+    }
+
     #[test]
     fn calc_precedence_and_funcs() {
         assert!((eval_expr("2 + 3 * 4").unwrap() - 14.0).abs() < 1e-9);
@@ -1350,9 +1366,12 @@ mod tests {
 
     #[test]
     fn date_math_roundtrip_and_workdays() {
+        let cfg = test_cfg();
         let out = execute_tool(
             "date_calc",
             r#"{"op":"add","date":"2026-11-17","days":14}"#,
+            &cfg,
+            false,
         );
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["result"], "2026-12-01");
@@ -1361,6 +1380,8 @@ mod tests {
         let wd = execute_tool(
             "date_calc",
             r#"{"op":"workdays","date":"2026-11-16","date2":"2026-11-23"}"#,
+            &cfg,
+            false,
         );
         let wv: Value = serde_json::from_str(&wd).unwrap();
         assert_eq!(wv["workdays"], 5);
@@ -1368,20 +1389,24 @@ mod tests {
 
     #[test]
     fn unit_conversion() {
-        let out = execute_tool("unit_convert", r#"{"value":100,"from":"C","to":"F"}"#);
+        let cfg = test_cfg();
+        let out = execute_tool("unit_convert", r#"{"value":100,"from":"C","to":"F"}"#, &cfg, false);
         let v: Value = serde_json::from_str(&out).unwrap();
         assert!((v["result"].as_f64().unwrap() - 212.0).abs() < 1e-9);
 
-        let e = execute_tool("unit_convert", r#"{"value":2,"from":"kWh","to":"kJ"}"#);
+        let e = execute_tool("unit_convert", r#"{"value":2,"from":"kWh","to":"kJ"}"#, &cfg, false);
         let ev: Value = serde_json::from_str(&e).unwrap();
         assert!((ev["result"].as_f64().unwrap() - 7200.0).abs() < 1e-9);
     }
 
     #[test]
     fn json_csv_diff_hash_tools() {
+        let cfg = test_cfg();
         let jq = execute_tool(
             "json_query",
             r#"{"json_str":"{\"items\":[{\"name\":\"a\",\"price\":12}]}","pointer":"/items/0/price"}"#,
+            &cfg,
+            false,
         );
         let jv: Value = serde_json::from_str(&jq).unwrap();
         assert_eq!(jv["value"], 12);
@@ -1389,6 +1414,8 @@ mod tests {
         let csv = execute_tool(
             "csv_summary",
             r#"{"csv_text":"item,cost\n\"a,b\",10\nc,20"}"#,
+            &cfg,
+            false,
         );
         let cv: Value = serde_json::from_str(&csv).unwrap();
         assert_eq!(cv["row_count"], 2);
@@ -1397,17 +1424,31 @@ mod tests {
         let diff = execute_tool(
             "text_diff",
             r#"{"old_text":"a\nb\nc","new_text":"a\nx\nc\nd"}"#,
+            &cfg,
+            false,
         );
         let dv: Value = serde_json::from_str(&diff).unwrap();
         assert_eq!(dv["added"], 2);
         assert_eq!(dv["removed"], 1);
         assert_eq!(dv["unchanged"], 2);
 
-        let hash = execute_tool("encode_hash", r#"{"op":"sha256","input":"abc"}"#);
+        let hash = execute_tool("encode_hash", r#"{"op":"sha256","input":"abc"}"#, &cfg, false);
         let hv: Value = serde_json::from_str(&hash).unwrap();
         assert_eq!(
             hv["result"],
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    #[test]
+    fn device_tool_permission_and_catalog() {
+        let cfg = test_cfg();
+        let blocked = execute_tool("shell_exec", r#"{"command":"echo hi"}"#, &cfg, false);
+        let bv: Value = serde_json::from_str(&blocked).unwrap();
+        assert!(bv["error"].as_str().unwrap().contains("device_tools"));
+
+        let safe_catalog = tool_definitions(false);
+        let full_catalog = tool_definitions(true);
+        assert!(full_catalog.as_array().unwrap().len() > safe_catalog.as_array().unwrap().len());
     }
 }
