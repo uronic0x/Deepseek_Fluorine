@@ -1,56 +1,59 @@
-# Fluorine · DeepSeek 安卓原生工作台 & 本地计算 Harness
+# Fluorine · DeepSeek Native Android Workbench
 
-极简、可审计的 DeepSeek 原生客户端（包名 `com.uronic0x.fluorine`，显示名 `Fluorine`，仅 `arm64-v8a`），对齐 DeepSeek 2026-11 API，采用 **Rust JNI 直接流式回调 + Jetpack Compose** 原生架构，彻底去除本地 HTTP 回环与 WebView。
+[English](#english) · [中文](#中文)
 
----
-
-## 架构特点
-
-1. **零 HTTP 回环 · 进程内 JNI 流式直连**
-   - 摒弃 `127.0.0.1:8787` 本地明文 TCP 监听（无需开启 `usesCleartextTraffic`），消除同机应用探测本地端口与前后台断连风险。
-   - Rust 核心 (`src/lib.rs`) 通过统一的 `EventSink` 特征与 C-ABI JNI 入口 (`FluorineBridge`) 直接将 SSE 事件帧实时回调至 Kotlin 层，并支持基于 `AtomicBool` 的毫秒级流中断 (`Abort`)。
-   - 若构建宿主机未安装 `cargo-ndk`，Kotlin 层自动无缝回退至 1:1 协议对等的原生执行引擎 (`KotlinNativeEngine`)，确保任何环境下均可编译运行。
-
-2. **可控依赖与极致体积**
-   - Rust 侧仅保留 `ureq` (`rustls`) 与 `serde_json` 两个直接依赖，开启 `lto = true`、`codegen-units = 1`、`strip = true`。
-   - Android 侧采用 Jetpack Compose 构建温润纸感（Warm Editorial Paper & Forest Ink）原生界面，不引入 WebView、不引入 OkHttp/Retrofit/kotlinx-serialization，JSON 解析直接使用 Android 平台内置 `org.json`。
-
-3. **对齐 DeepSeek 2026-11 API（Chat & Work 四步协同）**
-   - 支持 `deepseek-flash`（`V4.1-Flash-1017`，支持官方联网工具 `deepseek_web_search` / `deepseek_read_url`）与 `deepseek-v4-pro`（`V4-Pro-0813`）。
-   - 支持 `thinking` (`enabled` / `disabled`)、`reasoning_effort` (`none` / `low` / `high` / `max`)、最高 `384K` (`393216`) 输出预算与 UTC 峰谷动态计费估算。
-   - Work 四步状态机：`01 拆解目标 (plan)` → `02 联网取证 (research)` → `03 本地工具执行 (execute)` → `04 文本审查 (review)`。
-
-4. **19 项本地确定性计算与设备 Harness 工具**
-   - **9 项确定性计算工具**：`calc`、`stats`、`unit_convert`、`date_calc`、`text_metrics`、`json_query`、`csv_summary`、`text_diff`、`encode_hash`。
-   - **5 项只读环境与工作区工具**：`device_probe`、`fs_list`、`fs_read`、`fs_search`、`git_inspect`。
-   - **5 项设备控制与修改工具（受“设备/Shell”开关保护）**：`fs_write`、`fs_edit`、`termux_device`、`android_ui`、`shell_exec`。
+A minimal, auditable DeepSeek native client (package `com.uronic0x.fluorine`, display name `Fluorine`, `arm64-v8a` only), aligned with the DeepSeek 2026-11 API, built on a **Rust JNI / native Kotlin engine + Jetpack Compose** architecture with **no local HTTP loopback and no WebView**.
 
 ---
 
-## Android APK 沙箱已知能力边界
+<a id="english"></a>
+## English
 
-- **应用私有工作区**：默认工作区位于 `context.filesDir/workspace`（无需额外存储权限即可完整执行 `fs_list`、`fs_read`、`fs_write`、`fs_edit`、`fs_search` 及全部确定性计算工具）。
-- **共享存储只读访问 (`/sdcard`)**：在「连接设置」中开启「允许只读访问 /sdcard 共享存储」并授予权限后，`fs_list` / `fs_read` / `fs_search` 可只读访问 `/sdcard`，永不修改工作区外文件。
-- **外部二进制探测 (`device_probe`)**：标准 Android APK 沙箱的 `PATH` 内通常不包含 `adb`、`rish`、`git`、`termux-*` 等外部二进制，`device_probe` 会如实返回 `false`；同时电池、内存、剪贴板、震动、Toast、浏览器跳转均已对接 Android 原生系统服务。
-- **隐私与内存驻留**：API Key 与会话上下文仅在当前进程内存中保留，无第三方中转或云端同步，关闭应用即销毁。
+### Overview
 
----
+- **Zero HTTP loopback, in-process native execution**: the Rust core (`src/lib.rs`) is bridged over JNI via `EventSink` / C-ABI entry points, with a protocol-equivalent Kotlin engine (`KotlinNativeEngine`) as fallback when `libfluorine.so` is absent.
+- **Theming & rendering**: pure carbon dark / white light themes (dark by default), native Compose Markdown + LaTeX math rendering, collapsible web-search citations, and auto-hide keyboard on list drag.
+- **DeepSeek 2026-11 API**: official `deepseek-flash` / `deepseek-v4-pro` presets plus custom model ID / Base URL; autonomous Work agent instead of a fixed four-step workflow; Prefix Cache-friendly history (static `system`/`tools` prefix, per-round `reasoning_content`, stripped historical reasoning).
+- **Local tools & workspace artifacts**: deterministic computation and Android/Termux workspace tools; `fs_write`/`fs_edit` artifacts appear as preview/share/SAF-export cards; multi-session persistence with JSON/Markdown export and log export.
 
-## 构建说明
+### Repository maintenance notes
 
-### 1. 构建 Android APK（含可选 Rust JNI 交叉编译）
+- **`Cargo.lock` is tracked on purpose.** This is a binary application, so locking the dependency graph makes builds reproducible. When upgrading Rust dependencies, run `cargo update` (or `cargo update -p <crate>`) and commit the resulting `Cargo.lock` diff together with the source change.
+- **`metadata.json` is intentionally absent.** It is an AI Studio template remnant (with a `SERVER_SIDE_GEMINI_API` capability that has nothing to do with this project) and must not be re-added.
+- **`latest_reminder` uses the official DeepSeek format**: a dedicated `role: "latest_reminder"` message placed directly before the `user` message, with content `<date>,<weekday>,<location>,<platform>,<language>` (e.g. `2026-11-17,星期二,Local,App,中文`). Do not revert to free-form text or attach it as a field on the user message — the API returns `400` otherwise.
 
-若宿主机已配置 Rust、`aarch64-linux-android` target 与 `cargo-ndk`，Gradle 的 `preBuild` 任务会自动调用 `buildRustSo` 编译并打包 `app/src/main/jniLibs/arm64-v8a/libfluorine.so`：
+### Build & test
 
 ```sh
 gradle assembleDebug
+gradle :app:testDebugUnitTest
+cargo test
+node --test tests/core.test.mjs
 ```
 
-输出产物：`app/build/outputs/apk/debug/app-debug.apk`
+---
 
-### 2. 桌面端 CLI 模式与测试
+<a id="中文"></a>
+## 中文
+
+### 概览
+
+- **零 HTTP 回环 · 进程内原生执行**：Rust 核心 (`src/lib.rs`) 通过 `EventSink` 与 C-ABI JNI 入口接入；当 `libfluorine.so` 缺失时，回退到协议对等的 Kotlin 原生执行引擎 (`KotlinNativeEngine`)。
+- **主题、渲染与交互**：纯碳黑暗 / 纯白亮色双主题（默认暗色）、原生 Compose Markdown + LaTeX 数学公式渲染、联网引用折叠展开、列表拖动自动收起键盘。
+- **DeepSeek 2026-11 API**：官方 `deepseek-flash` / `deepseek-v4-pro` 预设，并支持自定义模型 ID 与 Base URL；Work 模式为自主 Agent 而非固定四步流程；历史处理保障 Prefix Cache 命中（`system`/`tools` 前缀静态、工具循环内保留当轮 `reasoning_content`、跨轮剥离历史推理）。
+- **本地工具链与工作区产物**：确定性计算与 Android/Termux 工作区工具；`fs_write`/`fs_edit` 产物以预览/分享/SAF 导出卡片呈现；多会话持久化，支持 JSON/Markdown 历史导出与运行日志导出。
+
+### 仓库维护说明
+
+- **`Cargo.lock` 有意纳入版本管理。** 本项目是二进制应用，锁定依赖图可保证构建可复现。升级 Rust 依赖时请运行 `cargo update`（或 `cargo update -p <crate>`），并把生成的 `Cargo.lock` 差异与源码改动一并提交。
+- **`metadata.json` 有意删除。** 它是 AI Studio 模板残留（含与本项目无关的 `SERVER_SIDE_GEMINI_API` 能力声明），不应再次添加。
+- **`latest_reminder` 采用 DeepSeek 官方格式**：独立 `role: "latest_reminder"` 消息、紧邻 `user` 消息之前，内容为 `<date>,<weekday>,<location>,<platform>,<language>`（例如 `2026-11-17,星期二,Local,App,中文`）。不要改回自由文本，也不要作为字段附加在 user 消息上——否则 API 返回 `400`。
+
+### 构建与测试
 
 ```sh
-cargo test
+gradle assembleDebug
 gradle :app:testDebugUnitTest
+cargo test
+node --test tests/core.test.mjs
 ```

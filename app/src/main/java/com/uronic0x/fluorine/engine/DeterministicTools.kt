@@ -34,6 +34,87 @@ import kotlin.math.tan
  */
 object DeterministicTools {
 
+    val TOOL_NAMES = setOf(
+        "calc",
+        "calc_eval",
+        "stats",
+        "stats_summary",
+        "unit_convert",
+        "date_calc",
+        "text_metrics",
+        "json_query",
+        "csv_summary",
+        "text_diff",
+        "encode_hash"
+    )
+
+    fun declarations(): JSONArray = toolDefinitions()
+
+    fun execute(name: String, args: JSONObject): JSONObject {
+        return try {
+            val res = when (name) {
+                "calc", "calc_eval" -> {
+                    val normArgs = JSONObject(args.toString())
+                    if (!normArgs.has("expression") && normArgs.has("expr")) {
+                        var exprStr = normArgs.optString("expr", "")
+                        val varsObj = normArgs.optJSONObject("vars")
+                        if (varsObj != null) {
+                            val keys = varsObj.keys()
+                            while (keys.hasNext()) {
+                                val k = keys.next()
+                                val v = varsObj.optDouble(k, 0.0)
+                                exprStr = exprStr.replace(Regex("\\b${Regex.escape(k)}\\b"), v.toString())
+                            }
+                        }
+                        normArgs.put("expression", exprStr)
+                    }
+                    // Support round(x, n) 2-arg call in expression if present
+                    val exprRaw = normArgs.optString("expression", "")
+                    val rewritten = Regex("""round\(([^,]+),\s*(\d+)\)""").replace(exprRaw) { m ->
+                        val inner = m.groupValues[1]
+                        val digits = m.groupValues[2].toIntOrNull() ?: 0
+                        val scale = 10.0.pow(digits).toLong()
+                        "(round(($inner) * $scale) / $scale)"
+                    }
+                    normArgs.put("expression", rewritten)
+                    val out = runCalc(normArgs)
+                    out.put("ok", true).put("result", out.optDouble("value"))
+                }
+                "stats", "stats_summary" -> {
+                    val normArgs = JSONObject(args.toString())
+                    if (!normArgs.has("numbers") && normArgs.has("values")) {
+                        normArgs.put("numbers", normArgs.optJSONArray("values"))
+                    }
+                    runStats(normArgs).put("ok", true)
+                }
+                "unit_convert" -> runUnitConvert(args).put("ok", true)
+                "date_calc" -> {
+                    val normArgs = JSONObject(args.toString())
+                    if (normArgs.optString("op") == "diff_days") {
+                        normArgs.put("op", "diff")
+                    }
+                    if (!normArgs.has("date2") && normArgs.has("other_date")) {
+                        normArgs.put("date2", normArgs.optString("other_date"))
+                    }
+                    val out = runDateCalc(normArgs).put("ok", true)
+                    if (out.has("days_between") && !out.has("days")) {
+                        out.put("days", out.optLong("days_between"))
+                    }
+                    out
+                }
+                "text_metrics" -> runTextMetrics(args).put("ok", true)
+                "json_query" -> runJsonQuery(args).put("ok", true)
+                "csv_summary" -> runCsvSummary(args).put("ok", true)
+                "text_diff" -> runTextDiff(args).put("ok", true)
+                "encode_hash" -> runEncodeHash(args).put("ok", true)
+                else -> JSONObject().put("ok", false).put("error", "Unknown deterministic tool: $name")
+            }
+            res
+        } catch (e: Exception) {
+            JSONObject().put("ok", false).put("error", e.message ?: e.toString())
+        }
+    }
+
     fun toolDefinitions(): JSONArray {
         return JSONArray(
             """

@@ -14,151 +14,191 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import com.uronic0x.fluorine.R
 
-// Warm Editorial Paper & Forest Ink palette matching Fluorine's design identity
-val PaperLight = Color(0xFFF9F8F4)
-val SurfaceLight = Color(0xFFFFFFFF)
-val InkLight = Color(0xFF243C38)
-val MutedLight = Color(0xFF75817A)
-val LineLight = Color(0xFFE2E7DF)
-val AccentLight = Color(0xFF476A58)
-val SoftLight = Color(0xFFEDF2EB)
-val WarnLight = Color(0xFFA45C34)
-val TaskPanelLight = Color(0xFFF1F3ED)
-val ThinkingBgLight = Color(0xFFF3F5F0)
-val ToolBadgeBgLight = Color(0xFFEEF3F1)
-val ToolBadgeFgLight = Color(0xFF1F4E45)
-val TabTrackLight = Color(0xFFEEEFE9)
+enum class AppThemeMode(val id: String) {
+    DARK("dark"),
+    LIGHT("light"),
+    SYSTEM("system");
 
-// Adaptive Forest Dark palette
-val PaperDark = Color(0xFF121816)
-val SurfaceDark = Color(0xFF1A221F)
-val InkDark = Color(0xFFE5ECE8)
-val MutedDark = Color(0xFF94A39B)
-val LineDark = Color(0xFF2B3732)
-val AccentDark = Color(0xFF78A88F)
-val SoftDark = Color(0xFF22302A)
-val WarnDark = Color(0xFFD98254)
-val TaskPanelDark = Color(0xFF17201C)
-val ThinkingBgDark = Color(0xFF1E2824)
-val ToolBadgeBgDark = Color(0xFF1E332C)
-val ToolBadgeFgDark = Color(0xFF9AD4C0)
-val TabTrackDark = Color(0xFF1E2623)
+    companion object {
+        fun fromId(id: String?): AppThemeMode =
+            entries.firstOrNull { it.id == id } ?: DARK
+    }
+}
 
-val PlusJakartaSans = FontFamily(
+// Pure Carbon Dark & Neutral White Palette (no green tint)
+private val LightBg = Color(0xFFFFFFFF)
+private val LightSurface = Color(0xFFF8F9FB)
+private val LightSurfaceVariant = Color(0xFFF1F3F6)
+private val LightPrimary = Color(0xFF2563EB)
+private val LightOnPrimary = Color(0xFFFFFFFF)
+private val LightPrimaryContainer = Color(0xFFDBEAFE)
+private val LightOnPrimaryContainer = Color(0xFF1E3A8A)
+private val LightSecondary = Color(0xFF475569)
+private val LightOnSecondary = Color(0xFFFFFFFF)
+private val LightSecondaryContainer = Color(0xFFE2E8F0)
+private val LightOnSecondaryContainer = Color(0xFF1E293B)
+private val LightTertiary = Color(0xFF0284C7)
+private val LightOnBg = Color(0xFF0F172A)
+private val LightOnSurface = Color(0xFF0F172A)
+private val LightOnSurfaceVariant = Color(0xFF64748B)
+private val LightOutline = Color(0xFFCBD5E1)
+private val LightOutlineVariant = Color(0xFFE2E8F0)
+private val LightError = Color(0xFFDC2626)
+
+private val DarkBg = Color(0xFF0D0F12)
+private val DarkSurface = Color(0xFF15181E)
+private val DarkSurfaceVariant = Color(0xFF1E222B)
+private val DarkPrimary = Color(0xFF3B82F6)
+private val DarkOnPrimary = Color(0xFFFFFFFF)
+private val DarkPrimaryContainer = Color(0xFF1E3A8A)
+private val DarkOnPrimaryContainer = Color(0xFFDBEAFE)
+private val DarkSecondary = Color(0xFF94A3B8)
+private val DarkOnSecondary = Color(0xFF0F172A)
+private val DarkSecondaryContainer = Color(0xFF262C36)
+private val DarkOnSecondaryContainer = Color(0xFFE2E8F0)
+private val DarkTertiary = Color(0xFF38BDF8)
+private val DarkOnBg = Color(0xFFF1F5F9)
+private val DarkOnSurface = Color(0xFFF1F5F9)
+private val DarkOnSurfaceVariant = Color(0xFF94A3B8)
+private val DarkOutline = Color(0xFF333946)
+private val DarkOutlineVariant = Color(0xFF252A34)
+private val DarkError = Color(0xFFF87171)
+
+private val LightColorScheme = lightColorScheme(
+    primary = LightPrimary,
+    onPrimary = LightOnPrimary,
+    primaryContainer = LightPrimaryContainer,
+    onPrimaryContainer = LightOnPrimaryContainer,
+    secondary = LightSecondary,
+    onSecondary = LightOnSecondary,
+    secondaryContainer = LightSecondaryContainer,
+    onSecondaryContainer = LightOnSecondaryContainer,
+    tertiary = LightTertiary,
+    background = LightBg,
+    onBackground = LightOnBg,
+    surface = LightSurface,
+    onSurface = LightOnSurface,
+    surfaceVariant = LightSurfaceVariant,
+    onSurfaceVariant = LightOnSurfaceVariant,
+    outline = LightOutline,
+    outlineVariant = LightOutlineVariant,
+    error = LightError
+)
+
+private val DarkColorScheme = darkColorScheme(
+    primary = DarkPrimary,
+    onPrimary = DarkOnPrimary,
+    primaryContainer = DarkPrimaryContainer,
+    onPrimaryContainer = DarkOnPrimaryContainer,
+    secondary = DarkSecondary,
+    onSecondary = DarkOnSecondary,
+    secondaryContainer = DarkSecondaryContainer,
+    onSecondaryContainer = DarkOnSecondaryContainer,
+    tertiary = DarkTertiary,
+    background = DarkBg,
+    onBackground = DarkOnBg,
+    surface = DarkSurface,
+    onSurface = DarkOnSurface,
+    surfaceVariant = DarkSurfaceVariant,
+    onSurfaceVariant = DarkOnSurfaceVariant,
+    outline = DarkOutline,
+    outlineVariant = DarkOutlineVariant,
+    error = DarkError
+)
+
+val SansFontFamily = FontFamily(
     Font(R.font.plus_jakarta_sans, FontWeight.Normal),
     Font(R.font.plus_jakarta_sans, FontWeight.Medium),
     Font(R.font.plus_jakarta_sans, FontWeight.SemiBold),
     Font(R.font.plus_jakarta_sans, FontWeight.Bold)
 )
 
-val JetBrainsMono = FontFamily(
+val MonoFontFamily = FontFamily(
     Font(R.font.jetbrains_mono, FontWeight.Normal),
     Font(R.font.jetbrains_mono, FontWeight.Medium)
 )
 
-private val LightColorScheme = lightColorScheme(
-    primary = AccentLight,
-    onPrimary = Color.White,
-    primaryContainer = SoftLight,
-    onPrimaryContainer = InkLight,
-    secondary = ToolBadgeFgLight,
-    onSecondary = Color.White,
-    secondaryContainer = ToolBadgeBgLight,
-    onSecondaryContainer = ToolBadgeFgLight,
-    tertiary = WarnLight,
-    onTertiary = Color.White,
-    background = PaperLight,
-    onBackground = InkLight,
-    surface = SurfaceLight,
-    onSurface = InkLight,
-    surfaceVariant = TaskPanelLight,
-    onSurfaceVariant = MutedLight,
-    outline = LineLight,
-    outlineVariant = LineLight,
-    error = WarnLight,
-    onError = Color.White
-)
-
-private val DarkColorScheme = darkColorScheme(
-    primary = AccentDark,
-    onPrimary = Color(0xFF0E1F17),
-    primaryContainer = SoftDark,
-    onPrimaryContainer = InkDark,
-    secondary = ToolBadgeFgDark,
-    onSecondary = Color(0xFF0E1F17),
-    secondaryContainer = ToolBadgeBgDark,
-    onSecondaryContainer = ToolBadgeFgDark,
-    tertiary = WarnDark,
-    onTertiary = Color.Black,
-    background = PaperDark,
-    onBackground = InkDark,
-    surface = SurfaceDark,
-    onSurface = InkDark,
-    surfaceVariant = TaskPanelDark,
-    onSurfaceVariant = MutedDark,
-    outline = LineDark,
-    outlineVariant = LineDark,
-    error = WarnDark,
-    onError = Color.Black
-)
-
 val FluorineTypography = Typography(
-    displayLarge = TextStyle(
-        fontFamily = PlusJakartaSans,
-        fontWeight = FontWeight.Normal,
-        fontSize = 36.sp,
-        lineHeight = 46.sp,
-        letterSpacing = 0.4.sp
+    headlineLarge = TextStyle(
+        fontFamily = SansFontFamily,
+        fontWeight = FontWeight.Bold,
+        fontSize = 26.sp,
+        lineHeight = 33.sp
     ),
-    headlineMedium = TextStyle(
-        fontFamily = PlusJakartaSans,
-        fontWeight = FontWeight.SemiBold,
+    headlineSmall = TextStyle(
+        fontFamily = SansFontFamily,
+        fontWeight = FontWeight.Bold,
         fontSize = 20.sp,
         lineHeight = 28.sp
     ),
-    titleMedium = TextStyle(
-        fontFamily = PlusJakartaSans,
+    titleLarge = TextStyle(
+        fontFamily = SansFontFamily,
         fontWeight = FontWeight.SemiBold,
-        fontSize = 16.sp,
-        lineHeight = 22.sp,
-        letterSpacing = 0.5.sp
+        fontSize = 18.sp,
+        lineHeight = 24.sp
     ),
-    bodyLarge = TextStyle(
-        fontFamily = PlusJakartaSans,
-        fontWeight = FontWeight.Normal,
+    titleMedium = TextStyle(
+        fontFamily = SansFontFamily,
+        fontWeight = FontWeight.SemiBold,
         fontSize = 15.sp,
-        lineHeight = 26.sp
+        lineHeight = 22.sp
     ),
-    bodyMedium = TextStyle(
-        fontFamily = PlusJakartaSans,
-        fontWeight = FontWeight.Normal,
-        fontSize = 13.sp,
+    titleSmall = TextStyle(
+        fontFamily = SansFontFamily,
+        fontWeight = FontWeight.Medium,
+        fontSize = 14.sp,
         lineHeight = 20.sp
     ),
-    labelMedium = TextStyle(
-        fontFamily = PlusJakartaSans,
-        fontWeight = FontWeight.Medium,
-        fontSize = 12.sp,
-        lineHeight = 16.sp,
-        letterSpacing = 0.4.sp
+    bodyLarge = TextStyle(
+        fontFamily = SansFontFamily,
+        fontWeight = FontWeight.Normal,
+        fontSize = 15.sp,
+        lineHeight = 23.sp
     ),
-    labelSmall = TextStyle(
-        fontFamily = PlusJakartaSans,
+    bodyMedium = TextStyle(
+        fontFamily = SansFontFamily,
+        fontWeight = FontWeight.Normal,
+        fontSize = 14.sp,
+        lineHeight = 21.sp
+    ),
+    bodySmall = TextStyle(
+        fontFamily = SansFontFamily,
+        fontWeight = FontWeight.Normal,
+        fontSize = 12.sp,
+        lineHeight = 18.sp
+    ),
+    labelLarge = TextStyle(
+        fontFamily = SansFontFamily,
+        fontWeight = FontWeight.Medium,
+        fontSize = 13.sp,
+        lineHeight = 18.sp
+    ),
+    labelMedium = TextStyle(
+        fontFamily = MonoFontFamily,
         fontWeight = FontWeight.Medium,
         fontSize = 11.sp,
-        lineHeight = 15.sp,
-        letterSpacing = 0.8.sp
+        lineHeight = 16.sp
+    ),
+    labelSmall = TextStyle(
+        fontFamily = MonoFontFamily,
+        fontWeight = FontWeight.Normal,
+        fontSize = 11.sp,
+        lineHeight = 15.sp
     )
 )
 
 @Composable
 fun FluorineTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
+    themeMode: AppThemeMode = AppThemeMode.DARK,
     content: @Composable () -> Unit
 ) {
-    val colorScheme = if (darkTheme) DarkColorScheme else LightColorScheme
+    val isDark = when (themeMode) {
+        AppThemeMode.DARK -> true
+        AppThemeMode.LIGHT -> false
+        AppThemeMode.SYSTEM -> isSystemInDarkTheme()
+    }
     MaterialTheme(
-        colorScheme = colorScheme,
+        colorScheme = if (isDark) DarkColorScheme else LightColorScheme,
         typography = FluorineTypography,
         content = content
     )

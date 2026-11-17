@@ -2,177 +2,167 @@ package com.uronic0x.fluorine.protocol
 
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.net.URI
-import java.util.Calendar
+import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.TimeZone
-import kotlin.math.max
 
-enum class WorkMode(val id: String) {
-    CHAT("chat"),
-    WORK("work")
-}
+data class ModelOption(val id: String, val label: String)
+data class EffortOption(val id: String, val label: String)
+data class MaxTokenOption(val value: Int, val label: String)
 
-data class ModelOption(
-    val id: String,
-    val label: String,
-    val shortLabel: String,
-    val supportsWeb: Boolean
-)
-
-val MODEL_OPTIONS = listOf(
-    ModelOption(
-        id = "deepseek-flash",
-        label = "DeepSeek Flash (V4.1-Flash-1017) · 支持官方联网与本地工具",
-        shortLabel = "DeepSeek Flash",
-        supportsWeb = true
-    ),
-    ModelOption(
-        id = "deepseek-v4-pro",
-        label = "DeepSeek V4 Pro (V4-Pro-0813) · 支持本地工具（不支持官方联网）",
-        shortLabel = "DeepSeek V4 Pro",
-        supportsWeb = false
-    )
-)
-
-data class EffortOption(
-    val id: String,
-    val label: String
-)
-
-val EFFORT_OPTIONS = listOf(
-    EffortOption("none", "关闭 · 更快"),
-    EffortOption("low", "Low"),
-    EffortOption("high", "High (推荐)"),
-    EffortOption("max", "Max · 更多时间与用量")
-)
-
-data class BudgetOption(
-    val tokens: Int,
-    val label: String
-)
-
-val BUDGET_OPTIONS = listOf(
-    BudgetOption(8192, "8,192 tokens"),
-    BudgetOption(16384, "16,384 tokens (默认)"),
-    BudgetOption(32768, "32,768 tokens"),
-    BudgetOption(65536, "65,536 tokens (64K 思考默认)"),
-    BudgetOption(131072, "131,072 tokens (128K)"),
-    BudgetOption(393216, "393,216 tokens (384K 上限)")
+data class SearchSource(
+    val title: String,
+    val url: String,
+    val snippet: String = "",
+    val siteName: String = "",
+    val publishedAt: String = "",
+    val citeIndex: Int? = null
 )
 
 data class CitationPoint(
-    val startIndex: Int,
-    val endIndex: Int,
-    val url: String,
-    val title: String,
-    val number: Int
+    val offset: Int,
+    val indexes: List<Int>
 )
 
-data class SourceLink(
-    val url: String,
-    val title: String
-)
-
-data class ToolCallRecord(
+data class LocalToolCallRecord(
+    val round: Int,
     val id: String,
     val name: String,
     val arguments: String,
-    val result: String
+    val output: String
 )
 
-data class TokenUsage(
-    val promptTokens: Long = 0,
-    val completionTokens: Long = 0,
-    val cacheHitTokens: Long = 0,
-    val cacheMissTokens: Long? = null,
-    val reasoningTokens: Long = 0,
-    val toolSearchCount: Int = 0,
-    val toolImageSearchCount: Int = 0,
-    val toolFetchCount: Int = 0
+data class WorkspaceFileArtifact(
+    val relativePath: String,
+    val fileName: String,
+    val bytes: Long,
+    val operation: String // "fs_write" | "fs_edit" | "workspace"
 )
 
-data class ProtocolMessage(
-    val role: String,
-    val content: String = "",
-    val reasoningContent: String = "",
-    val serverToolCallsJson: JSONArray? = null,
-    val annotationsJson: JSONArray? = null,
-    val localToolCalls: List<ToolCallRecord> = emptyList()
-)
-
-data class UiChatMessage(
-    val id: Long,
-    val role: String, // "user", "assistant", "error"
-    val content: String,
-    val reasoningContent: String = "",
-    val progressText: String? = null,
+data class ChatMessage(
+    val id: String,
+    val role: String, // "user" | "assistant"
+    val text: String,
+    val tags: List<String> = emptyList(),
+    val thinking: String = "",
+    val sources: List<SearchSource> = emptyList(),
     val citations: List<CitationPoint> = emptyList(),
-    val sources: List<SourceLink> = emptyList(),
-    val localToolCalls: List<ToolCallRecord> = emptyList(),
-    val usageText: String? = null,
-    val incompleteNote: String? = null
+    val localToolCalls: List<LocalToolCallRecord> = emptyList(),
+    val usageText: String = "",
+    val isError: Boolean = false
 )
-
-data class WorkReport(
-    val prompt: String,
-    val mode: String,
-    val model: String,
-    val effort: String,
-    val web: Boolean,
-    val localTools: Boolean,
-    val deviceTools: Boolean,
-    val plan: String = "",
-    val toolsLog: String = "",
-    val review: String = "",
-    val answer: ProtocolMessage? = null,
-    val usages: List<TokenUsage?> = emptyList()
-)
-
-data class SessionSnapshot(
-    val convTitle: String = "Fluorine",
-    val mode: WorkMode = WorkMode.CHAT,
-    val messages: List<UiChatMessage> = emptyList(),
-    val history: List<ProtocolMessage> = emptyList(),
-    val reports: List<WorkReport> = emptyList(),
-    val showTaskPanel: Boolean = false,
-    val activeWorkStep: Int = -1,
-    val taskStatusText: String = "准备开始",
-    val planText: String = "",
-    val toolsLogText: String = "",
-    val reviewText: String = ""
-)
-
-class ContentFilterException(message: String) : Exception(message)
-class StreamAbortedException(message: String = "已停止本地接收；上游可能仍有已计费用量。") : Exception(message)
 
 /**
- * 1:1 Kotlin port of `web/core.js` using Android platform `org.json` (zero third-party JSON dependencies).
+ * Represents a turn in the conversation context history.
+ * For DeepSeek Prefix Cache compliance in Work mode, `subturnMessages` stores the intermediate
+ * `assistant` (with `tool_calls`, without `reasoning_content`) and `tool` messages produced
+ * during that turn so subsequent turns hit the server KV cache.
  */
+data class ContextTurn(
+    val role: String,
+    val content: String,
+    val subturnMessages: List<String> = emptyList()
+)
+
+data class ConversationSession(
+    val id: String,
+    val title: String,
+    val mode: String = "chat",
+    val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = System.currentTimeMillis(),
+    val chatMessages: List<ChatMessage> = emptyList(),
+    val contextHistory: List<ContextTurn> = emptyList()
+)
+
+data class EngineTurnResult(
+    val ok: Boolean,
+    val model: String = "",
+    val stage: String = "chat",
+    val content: String = "",
+    val thinking: String = "",
+    val sources: List<SearchSource> = emptyList(),
+    val citations: List<CitationPoint> = emptyList(),
+    val localToolCalls: List<LocalToolCallRecord> = emptyList(),
+    val subturnMessages: List<String> = emptyList(),
+    val usageText: String = "",
+    val promptTokens: Int = 0,
+    val completionTokens: Int = 0,
+    val cacheHitTokens: Int = 0,
+    val cacheMissTokens: Int = 0,
+    val finishReason: String = "",
+    val rounds: Int = 1,
+    val error: String = ""
+)
+
 object CoreProtocol {
 
-    fun safeUrl(raw: String?): String? {
-        if (raw.isNullOrBlank()) return null
-        return try {
-            val uri = URI(raw.trim())
-            val scheme = uri.scheme?.lowercase(Locale.ROOT)
-            if ((scheme == "http" || scheme == "https") && uri.userInfo == null && !uri.host.isNullOrBlank()) {
-                uri.toString()
-            } else {
-                null
-            }
-        } catch (_: Exception) {
-            null
-        }
-    }
+    const val DEFAULT_API_BASE_URL = "https://api.deepseek.com"
 
-    fun slugifyAppName(name: String? = "app"): String {
-        val raw = (name ?: "app").trim().lowercase(Locale.ROOT)
-        val slug = raw
-            .replace(Regex("[^a-z0-9_-]+"), "-")
-            .trim('-')
-        return slug.ifEmpty { "app" }
+    const val DEFAULT_CHAT_SYSTEM_PROMPT =
+        "你是 Fluorine（DeepSeek 本地工作台），严谨、直接、重事实的中文技术与研究助手。优先给出可核验结论、关键依据、清晰推导与边界条件。数学公式请使用标准 LaTeX 语法（行内 \$...\$，独立公式块 \$\$...\$\$）。若证据不足或未联网核实，请明确说明不确定性，绝不编造来源、命令输出或实验数据。"
+
+    const val DEFAULT_WORK_SYSTEM_PROMPT =
+        "你是 Fluorine（DeepSeek 本地工作台），具备自主规划、取证与本地执行能力的中文技术 Agent。没有固定死板的工作流步骤限制：请根据用户的具体目标，自行判断是否需要拆解计划、是否需要调用联网搜索、本地确定性计算工具（calc/stats/unit_convert/date_calc/text_metrics/json_query/csv_summary/text_diff/encode_hash）或 Android/Termux 工作区工具（fs_list/fs_read/fs_write/fs_edit/fs_search/shell_exec/git_cmd/termux_api/self_adb）。简单问题直接回答或一步执行；复杂任务自主多轮调用工具验证后再汇总输出。数学公式请使用标准 LaTeX（\$...\$ 或 \$\$...\$\$）。生成或修改文件请使用 fs_write / fs_edit 写入工作区，方便用户直接导出产物。"
+
+    val MODEL_OPTIONS = listOf(
+        ModelOption("deepseek-flash", "deepseek-flash · DeepSeek Flash (V4.1-Flash · 官方联网 + 本地工具)"),
+        ModelOption("deepseek-v4-pro", "deepseek-v4-pro · DeepSeek V4 Pro (V4-Pro · 深度推理 + 本地工具)")
+    )
+
+    val THINKING_MODE_OPTIONS = listOf(
+        "auto" to "跟随底部开关",
+        "enabled" to "强制开启 (enabled)",
+        "disabled" to "强制关闭 (disabled)"
+    )
+
+    val EFFORT_OPTIONS = listOf(
+        EffortOption("none", "none · 极速无深度思考"),
+        EffortOption("low", "low · 轻量推理"),
+        EffortOption("medium", "medium · 标准推理"),
+        EffortOption("high", "high · 深度推理"),
+        EffortOption("max", "max · 极限推理")
+    )
+
+    val MAX_TOKEN_OPTIONS = listOf(
+        MaxTokenOption(4096, "4096 (快速)"),
+        MaxTokenOption(8192, "8192 (标准)"),
+        MaxTokenOption(16384, "16384 (推荐)"),
+        MaxTokenOption(32768, "32768 (长文)"),
+        MaxTokenOption(65536, "65536 (深度研究)"),
+        MaxTokenOption(131072, "131072 (超长输出)")
+    )
+
+    object AppLogger {
+        private const val MAX_ENTRIES = 500
+        private val entries = ArrayDeque<String>(MAX_ENTRIES)
+        private val fmt = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
+
+        @Synchronized
+        fun log(level: String, tag: String, message: String) {
+            val ts = fmt.format(Date())
+            val line = "[$ts] [$level/$tag] $message"
+            if (entries.size >= MAX_ENTRIES) {
+                entries.removeFirst()
+            }
+            entries.addLast(line)
+        }
+
+        fun info(tag: String, message: String) = log("INFO", tag, message)
+        fun warn(tag: String, message: String) = log("WARN", tag, message)
+        fun error(tag: String, message: String) = log("ERROR", tag, message)
+
+        @Synchronized
+        fun dumpText(): String {
+            if (entries.isEmpty()) return "暂无运行日志"
+            return entries.joinToString("\n")
+        }
+
+        @Synchronized
+        fun clear() {
+            entries.clear()
+        }
     }
 
     fun buildLatestReminder(date: Date = Date(), platform: String = "App"): String {
@@ -186,732 +176,406 @@ object CoreProtocol {
         return "$y-$m-$d,$weekday,Local,$platform,中文"
     }
 
-    fun sanitizeHistoryMessage(
-        msg: ProtocolMessage,
-        keepServerToolCalls: Boolean = false
-    ): JSONObject {
-        val out = JSONObject()
-        out.put("role", msg.role)
-        out.put("content", msg.content)
-        if (msg.role == "assistant" &&
-            keepServerToolCalls &&
-            msg.serverToolCallsJson != null &&
-            msg.serverToolCallsJson.length() > 0
-        ) {
-            out.put("server_tool_calls", JSONArray(msg.serverToolCallsJson.toString()))
-        }
-        return out
-    }
-
-    fun formatServerToolEvent(event: JSONObject?): String? {
-        if (event == null || event.optString("type") != "call_started") return null
-        val action = event.optJSONObject("call")?.optJSONObject("action") ?: JSONObject()
-        val actionType = action.optString("type")
-        if (actionType == "search") {
-            val queriesArr = action.optJSONArray("queries")
-            if (queriesArr != null && queriesArr.length() > 0) {
-                val list = mutableListOf<String>()
-                for (i in 0 until minOf(2, queriesArr.length())) {
-                    val q = queriesArr.optString(i)
-                    if (q.isNotBlank()) list.add(q)
-                }
-                if (list.isNotEmpty()) {
-                    return "正在联网搜索：${list.joinToString(" · ")}"
-                }
+    fun parseEngineTurnResult(rawJson: String): EngineTurnResult {
+        return try {
+            val obj = JSONObject(rawJson)
+            val ok = obj.optBoolean("ok", false)
+            if (!ok) {
+                val err = obj.optString("error", "未知引擎错误")
+                AppLogger.error("Engine", "Turn failed: $err")
+                return EngineTurnResult(ok = false, error = err)
             }
-        }
-        if ((actionType == "open_page" || actionType == "read_link")) {
-            val url = action.optString("url")
-            if (url.isNotBlank()) return "正在读取页面：$url"
-        }
-        if (actionType == "find_in_page") {
-            val pattern = action.optString("pattern")
-            if (pattern.isNotBlank()) return "正在页内查找：$pattern"
-        }
-        return "正在联网：${actionType.ifBlank { "检索" }}"
-    }
 
-    fun citationPoints(message: ProtocolMessage): List<CitationPoint> {
-        val codePointsCount = message.content.codePointCount(0, message.content.length)
-        val annotations = message.annotationsJson ?: return emptyList()
-        val points = mutableListOf<CitationPoint>()
-        for (i in 0 until annotations.length()) {
-            val a = annotations.optJSONObject(i) ?: continue
-            if (a.optString("type") != "url_citation") continue
-            val c = a.optJSONObject("url_citation") ?: continue
-            if (!c.has("start_index") || !c.has("end_index")) continue
-            val startIdx = c.optInt("start_index", -1)
-            val endIdx = c.optInt("end_index", -1)
-            val url = safeUrl(c.optString("url")) ?: continue
-            if (startIdx < 0 || startIdx >= endIdx || endIdx > codePointsCount) continue
-            val title = c.optString("title").ifBlank { url }
-            points.add(
-                CitationPoint(
-                    startIndex = startIdx,
-                    endIndex = endIdx,
-                    url = url,
-                    title = title,
-                    number = i + 1
-                )
-            )
-        }
-        return points.sortedBy { it.endIndex }
-    }
-
-    fun sourceList(message: ProtocolMessage?): List<SourceLink> {
-        if (message == null) return emptyList()
-        val found = LinkedHashMap<String, SourceLink>()
-        fun addSource(obj: JSONObject?) {
-            if (obj == null) return
-            val url = safeUrl(obj.optString("url")) ?: return
-            if (!found.containsKey(url)) {
-                val hostFallback = try {
-                    URI(url).host ?: url
-                } catch (_: Exception) {
-                    url
-                }
-                val title = obj.optString("title").ifBlank { hostFallback }
-                found[url] = SourceLink(url = url, title = title)
-            }
-        }
-
-        val annotations = message.annotationsJson
-        if (annotations != null) {
-            for (i in 0 until annotations.length()) {
-                val a = annotations.optJSONObject(i) ?: continue
-                if (a.optString("type") == "url_citation") {
-                    addSource(a.optJSONObject("url_citation"))
-                }
-            }
-        }
-        val stc = message.serverToolCallsJson
-        if (stc != null) {
-            for (i in 0 until stc.length()) {
-                val step = stc.optJSONObject(i) ?: continue
-                val calls = step.optJSONArray("calls") ?: continue
-                for (j in 0 until calls.length()) {
-                    val call = calls.optJSONObject(j) ?: continue
-                    val sources = call.optJSONArray("sources")
-                    if (sources != null) {
-                        for (k in 0 until sources.length()) {
-                            addSource(sources.optJSONObject(k))
-                        }
-                    }
-                    addSource(call.optJSONObject("page"))
-                }
-            }
-        }
-        return found.values.toList()
-    }
-
-    fun isPeakUtc(date: Date = Date()): Boolean {
-        val cal = Calendar.getInstance(TimeZone.getTimeZone("UTC"))
-        cal.time = date
-        val day = cal.get(Calendar.DAY_OF_WEEK)
-        if (day == Calendar.SUNDAY || day == Calendar.SATURDAY) return false
-        val h = cal.get(Calendar.HOUR_OF_DAY)
-        return (h in 1..3) || (h in 6..9)
-    }
-
-    fun parseUsage(u: JSONObject?): TokenUsage? {
-        if (u == null) return null
-        val prompt = if (u.has("prompt_tokens")) u.optLong("prompt_tokens", 0)
-        else u.optLong("input_tokens", 0)
-        val hit = if (u.has("prompt_cache_hit_tokens")) u.optLong("prompt_cache_hit_tokens", 0)
-        else u.optLong("cache_read_input_tokens", 0)
-        val miss = if (u.has("prompt_cache_miss_tokens") && !u.isNull("prompt_cache_miss_tokens")) {
-            u.optLong("prompt_cache_miss_tokens", max(0L, prompt - hit))
-        } else {
-            null
-        }
-        val out = if (u.has("completion_tokens")) u.optLong("completion_tokens", 0)
-        else u.optLong("output_tokens", 0)
-        val reasoning = u.optJSONObject("completion_tokens_details")?.optLong("reasoning_tokens", 0) ?: 0
-        val tools = u.optJSONObject("server_tool_use")
-        return TokenUsage(
-            promptTokens = prompt,
-            completionTokens = out,
-            cacheHitTokens = hit,
-            cacheMissTokens = miss,
-            reasoningTokens = reasoning,
-            toolSearchCount = tools?.optInt("tool_search", 0) ?: 0,
-            toolImageSearchCount = tools?.optInt("tool_image_search", 0) ?: 0,
-            toolFetchCount = tools?.optInt("tool_fetch", 0) ?: 0
-        )
-    }
-
-    fun estimateCostUsd(model: String, u: TokenUsage?, date: Date = Date()): Double? {
-        if (u == null) return null
-        val peak = if (isPeakUtc(date)) 2.0 else 1.0
-        val hitRate: Double
-        val missRate: Double
-        val outRate: Double
-        if (model == "deepseek-v4-pro") {
-            hitRate = 0.022 * peak
-            missRate = 0.66 * peak
-            outRate = 1.98 * peak
-        } else {
-            hitRate = 0.003 * peak
-            missRate = 0.15 * peak
-            outRate = 0.6 * peak
-        }
-        val hit = u.cacheHitTokens
-        val miss = u.cacheMissTokens ?: max(0L, u.promptTokens - hit)
-        val out = u.completionTokens
-        val webCost = (u.toolSearchCount + u.toolImageSearchCount + u.toolFetchCount) * 0.00075
-        val tokenCost = (hit * hitRate + miss * missRate + out * outRate) / 1_000_000.0
-        return tokenCost + webCost
-    }
-
-    fun usageText(u: TokenUsage?, model: String = "deepseek-flash"): String {
-        if (u == null) return "上游未返回完整用量"
-        val cost = estimateCostUsd(model, u)
-        val costStr = if (cost != null) String.format(Locale.US, " · 约 $%.5f", cost) else ""
-        return "输入 ${u.promptTokens} · 输出 ${u.completionTokens} tokens · 搜索 ${u.toolSearchCount} · 读页 ${u.toolFetchCount}$costStr"
-    }
-
-    fun clipText(s: String, maxLen: Int = 72): String {
-        return if (s.length > maxLen) s.take(maxLen - 1) + "…" else s
-    }
-
-    private fun mergeServerToolCalls(existing: JSONArray?, incoming: JSONArray): JSONArray {
-        if (existing == null) return JSONArray(incoming.toString())
-        val byIndex = sortedMapOf<Int, JSONObject>()
-        val unindexed = mutableListOf<Any>()
-        for (i in 0 until existing.length()) {
-            val item = existing.optJSONObject(i)
-            if (item != null && item.has("index") && !item.isNull("index")) {
-                byIndex[item.optInt("index")] = item
-            } else if (item != null) {
-                unindexed.add(item)
-            }
-        }
-        for (i in 0 until incoming.length()) {
-            val item = incoming.optJSONObject(i)
-            if (item != null && item.has("index") && !item.isNull("index")) {
-                byIndex[item.optInt("index")] = item
-            } else if (item != null) {
-                unindexed.add(item)
-            }
-        }
-        val out = JSONArray()
-        for ((_, v) in byIndex) out.put(v)
-        for (u in unindexed) out.put(u)
-        return out
-    }
-
-    data class StreamUpdate(
-        val message: ProtocolMessage,
-        val usage: TokenUsage?,
-        val title: String?,
-        val serverToolEvent: JSONObject?,
-        val localToolEvent: JSONObject?,
-        val thinking: Boolean
-    )
-
-    data class StreamResult(
-        val message: ProtocolMessage,
-        val usage: TokenUsage?,
-        val title: String?
-    )
-
-    class SseAccumulator(
-        private val onUpdate: (StreamUpdate) -> Unit = {}
-    ) {
-        private var contentBuilder = StringBuilder()
-        private var reasoningBuilder = StringBuilder()
-        private var serverToolCalls: JSONArray? = null
-        private var annotations: JSONArray? = null
-        private var localToolCalls: List<ToolCallRecord> = emptyList()
-        private var finishReason: String? = null
-        private var usage: TokenUsage? = null
-        private var title: String? = null
-        private var done: Boolean = false
-
-        private fun currentMessage(): ProtocolMessage {
-            return ProtocolMessage(
-                role = "assistant",
-                content = contentBuilder.toString(),
-                reasoningContent = reasoningBuilder.toString(),
-                serverToolCallsJson = serverToolCalls,
-                annotationsJson = annotations,
-                localToolCalls = localToolCalls
-            )
-        }
-
-        fun pushFrame(rawData: String) {
-            val trimmed = rawData.trim()
-            if (trimmed.isEmpty()) return
-            if (trimmed == "[DONE]") {
-                done = true
-                return
-            }
-            val chunk = try {
-                JSONObject(trimmed)
-            } catch (_: Exception) {
-                throw IllegalStateException("上游事件 JSON 格式错误。")
-            }
-            pushJson(chunk)
-        }
-
-        fun pushJson(chunk: JSONObject) {
-            val errObj = chunk.optJSONObject("error")
-            if (errObj != null) {
-                val msg = errObj.optString("message").ifBlank {
-                    "上游流式生成失败；已发生的用量仍可能计费。"
-                }
-                throw IllegalStateException(msg)
-            }
-            if (chunk.has("usage") && !chunk.isNull("usage")) {
-                usage = parseUsage(chunk.optJSONObject("usage"))
-            }
-            val choices = chunk.optJSONArray("choices")
-            val choice = if (choices != null && choices.length() > 0) choices.optJSONObject(0) else null
-            val localEvent = chunk.optJSONObject("local_tool_event")
-            if (choice == null) {
-                onUpdate(
-                    StreamUpdate(
-                        message = currentMessage(),
-                        usage = usage,
-                        title = title,
-                        serverToolEvent = null,
-                        localToolEvent = localEvent,
-                        thinking = false
+            val sources = mutableListOf<SearchSource>()
+            val srcArr = obj.optJSONArray("sources") ?: JSONArray()
+            for (i in 0 until srcArr.length()) {
+                val s = srcArr.optJSONObject(i) ?: continue
+                sources.add(
+                    SearchSource(
+                        title = s.optString("title", "").ifBlank { s.optString("url", "来源 #${i + 1}") },
+                        url = s.optString("url", ""),
+                        snippet = s.optString("snippet", ""),
+                        siteName = s.optString("site_name", ""),
+                        publishedAt = s.optString("published_at", ""),
+                        citeIndex = if (s.has("cite_index") && !s.isNull("cite_index")) s.optInt("cite_index") else null
                     )
                 )
-                return
             }
 
-            val delta = choice.optJSONObject("delta") ?: JSONObject()
-            if (delta.has("content") && !delta.isNull("content")) {
-                contentBuilder.append(delta.optString("content"))
-            }
-            val hasReasoningDelta = delta.has("reasoning_content") && !delta.isNull("reasoning_content") &&
-                delta.optString("reasoning_content").isNotEmpty()
-            if (hasReasoningDelta) {
-                reasoningBuilder.append(delta.optString("reasoning_content"))
-            }
-            if (delta.has("title") && !delta.isNull("title")) {
-                val t = delta.optString("title")
-                if (t.isNotBlank()) title = t
-            }
-            val stcDelta = delta.optJSONArray("server_tool_calls")
-            if (stcDelta != null) {
-                serverToolCalls = mergeServerToolCalls(serverToolCalls, stcDelta)
-            }
-            val annDelta = delta.optJSONArray("annotations")
-            if (annDelta != null) {
-                val target = annotations ?: JSONArray()
-                for (i in 0 until annDelta.length()) {
-                    target.put(annDelta.get(i))
+            val citations = mutableListOf<CitationPoint>()
+            val citArr = obj.optJSONArray("citations") ?: JSONArray()
+            for (i in 0 until citArr.length()) {
+                val c = citArr.optJSONObject(i) ?: continue
+                val offset = c.optInt("offset", -1)
+                val idxArr = c.optJSONArray("indexes") ?: JSONArray()
+                val idxList = mutableListOf<Int>()
+                for (j in 0 until idxArr.length()) {
+                    idxList.add(idxArr.optInt(j))
                 }
-                annotations = target
+                if (offset >= 0 && idxList.isNotEmpty()) {
+                    citations.add(CitationPoint(offset = offset, indexes = idxList))
+                }
             }
-            val ltcDelta = delta.optJSONArray("local_tool_calls")
-            if (ltcDelta != null) {
-                val list = mutableListOf<ToolCallRecord>()
-                for (i in 0 until ltcDelta.length()) {
-                    val obj = ltcDelta.optJSONObject(i) ?: continue
-                    list.add(
-                        ToolCallRecord(
-                            id = obj.optString("id"),
-                            name = obj.optString("name"),
-                            arguments = obj.optString("arguments"),
-                            result = obj.optString("result")
+
+            val toolCalls = mutableListOf<LocalToolCallRecord>()
+            val tcArr = obj.optJSONArray("local_tool_calls") ?: JSONArray()
+            for (i in 0 until tcArr.length()) {
+                val tc = tcArr.optJSONObject(i) ?: continue
+                toolCalls.add(
+                    LocalToolCallRecord(
+                        round = tc.optInt("round", 1),
+                        id = tc.optString("id", ""),
+                        name = tc.optString("name", ""),
+                        arguments = tc.optString("arguments", "{}"),
+                        output = tc.optString("output", "")
+                    )
+                )
+            }
+
+            val subturnMessages = mutableListOf<String>()
+            val subArr = obj.optJSONArray("subturn_messages") ?: JSONArray()
+            for (i in 0 until subArr.length()) {
+                val m = subArr.optJSONObject(i) ?: continue
+                subturnMessages.add(m.toString())
+            }
+
+            val usage = obj.optJSONObject("usage")
+            val promptTokens = usage?.optInt("prompt_tokens", 0) ?: 0
+            val completionTokens = usage?.optInt("completion_tokens", 0) ?: 0
+            val cacheHitTokens = usage?.optInt("prompt_cache_hit_tokens", 0) ?: 0
+            val cacheMissTokens = usage?.optInt("prompt_cache_miss_tokens", 0) ?: 0
+            val rounds = obj.optInt("rounds", 1)
+
+            val usageText = buildString {
+                if (promptTokens > 0 || completionTokens > 0) {
+                    append("输入 $promptTokens")
+                    if (cacheHitTokens > 0 || cacheMissTokens > 0) {
+                        val totalPrompt = (cacheHitTokens + cacheMissTokens).coerceAtLeast(promptTokens).coerceAtLeast(1)
+                        val pct = (cacheHitTokens * 100) / totalPrompt
+                        append(" (缓存命中 $cacheHitTokens · $pct%)")
+                    }
+                    append(" · 输出 $completionTokens tokens")
+                }
+                if (rounds > 1) {
+                    if (isNotEmpty()) append(" · ")
+                    append("$rounds 轮工具交互")
+                }
+            }
+
+            AppLogger.info(
+                "Engine",
+                "Turn ok: model=${obj.optString("model")} rounds=$rounds tools=${toolCalls.size} $usageText"
+            )
+
+            EngineTurnResult(
+                ok = true,
+                model = obj.optString("model", ""),
+                stage = obj.optString("stage", "chat"),
+                content = obj.optString("content", ""),
+                thinking = obj.optString("thinking", ""),
+                sources = sources,
+                citations = citations,
+                localToolCalls = toolCalls,
+                subturnMessages = subturnMessages,
+                usageText = usageText,
+                promptTokens = promptTokens,
+                completionTokens = completionTokens,
+                cacheHitTokens = cacheHitTokens,
+                cacheMissTokens = cacheMissTokens,
+                finishReason = obj.optString("finish_reason", ""),
+                rounds = rounds
+            )
+        } catch (e: Exception) {
+            AppLogger.error("Engine", "Parse turn result error: ${e.message}")
+            EngineTurnResult(ok = false, error = "解析响应失败: ${e.message}")
+        }
+    }
+
+    /**
+     * Extracts workspace file artifacts generated or modified by `fs_write` or `fs_edit`
+     * from a message's local tool calls so the UI can render rounded-corner export cards.
+     */
+    fun extractWorkspaceArtifacts(toolCalls: List<LocalToolCallRecord>): List<WorkspaceFileArtifact> {
+        val map = linkedMapOf<String, WorkspaceFileArtifact>()
+        for (tc in toolCalls) {
+            if (tc.name != "fs_write" && tc.name != "fs_edit") continue
+            val outObj = runCatching { JSONObject(tc.output) }.getOrNull() ?: continue
+            if (!outObj.optBoolean("ok", false)) continue
+
+            val argObj = runCatching { JSONObject(tc.arguments) }.getOrNull()
+            val rawPath = outObj.optString("path", "").ifBlank {
+                argObj?.optString("path", "").orEmpty()
+            }.trim().removePrefix("./")
+            if (rawPath.isBlank()) continue
+
+            val fileName = rawPath.substringAfterLast('/').ifBlank { rawPath }
+            val bytes = outObj.optLong("bytes", -1L).let { b ->
+                if (b >= 0L) b
+                else argObj?.optString("content", "")?.toByteArray(Charsets.UTF_8)?.size?.toLong() ?: 0L
+            }
+            map[rawPath] = WorkspaceFileArtifact(
+                relativePath = rawPath,
+                fileName = fileName,
+                bytes = bytes,
+                operation = tc.name
+            )
+        }
+        return map.values.toList()
+    }
+
+    /**
+     * Lists all user-generated files currently inside the app's workspace directory.
+     */
+    fun listWorkspaceFiles(workspaceRoot: File): List<WorkspaceFileArtifact> {
+        if (!workspaceRoot.exists() || !workspaceRoot.isDirectory) return emptyList()
+        val rootCanonical = runCatching { workspaceRoot.canonicalFile }.getOrDefault(workspaceRoot)
+        val rootPrefix = rootCanonical.path
+        val results = mutableListOf<WorkspaceFileArtifact>()
+
+        workspaceRoot.walkTopDown()
+            .onEnter { dir ->
+                dir.name != ".git" && dir.name != "target" && dir.name != "build"
+            }
+            .forEach { f ->
+                if (f.isFile && results.size < 200) {
+                    val cPath = runCatching { f.canonicalFile.path }.getOrDefault(f.path)
+                    val rel = if (cPath.startsWith(rootPrefix + File.separator)) {
+                        cPath.substring(rootPrefix.length + 1).replace('\\', '/')
+                    } else {
+                        f.name
+                    }
+                    results.add(
+                        WorkspaceFileArtifact(
+                            relativePath = rel,
+                            fileName = f.name,
+                            bytes = f.length(),
+                            operation = "workspace"
                         )
                     )
                 }
-                localToolCalls = list
             }
+        return results.sortedBy { it.relativePath }
+    }
 
-            val serverEvent = choice.optJSONObject("server_tool_event")
-            if (serverEvent?.optString("type") == "step_reasoning_done" &&
-                reasoningBuilder.isNotEmpty() &&
-                !reasoningBuilder.endsWith("\n")
-            ) {
-                reasoningBuilder.append("\n")
-            }
+    fun formatFileSize(bytes: Long): String {
+        if (bytes < 0) return ""
+        if (bytes < 1024) return "$bytes B"
+        val kb = bytes / 1024.0
+        if (kb < 1024) return String.format(Locale.US, "%.1f KB", kb)
+        val mb = kb / 1024.0
+        return String.format(Locale.US, "%.2f MB", mb)
+    }
 
-            if (choice.has("finish_reason") && !choice.isNull("finish_reason")) {
-                val fr = choice.optString("finish_reason")
-                if (fr.isNotBlank()) finishReason = fr
-            }
-
-            if (contentBuilder.length + reasoningBuilder.length > 2 * 1024 * 1024) {
-                throw IllegalStateException("单条回复过大，已停止接收。")
-            }
-
-            onUpdate(
-                StreamUpdate(
-                    message = currentMessage(),
-                    usage = usage,
-                    title = title,
-                    serverToolEvent = serverEvent,
-                    localToolEvent = localEvent,
-                    thinking = hasReasoningDelta
-                )
-            )
-        }
-
-        fun result(): StreamResult {
-            if (!done || finishReason.isNullOrBlank()) {
-                throw IllegalStateException("事件流中断，回复未完成；请手动重试。")
-            }
-            if (finishReason == "content_filter") {
-                throw ContentFilterException("上游内容审查拒绝了本轮回复。")
-            }
-            if (finishReason != "stop") {
-                val reasonMsg = when (finishReason) {
-                    "length" -> "输出预算耗尽，当前回复未完成。请提高预算后重试。"
-                    "insufficient_system_resource" -> "上游推理资源暂时不足，请稍后手动重试。"
-                    "aborted" -> "上游生成过程被中断。"
-                    else -> "异常结束状态：$finishReason"
-                }
-                throw IllegalStateException(reasonMsg)
-            }
-            val msg = currentMessage()
-            if (msg.content.trim().isEmpty()) {
-                throw IllegalStateException("上游未返回正文；不会将思考内容冒充答案。")
-            }
-            return StreamResult(
-                message = msg,
-                usage = usage,
-                title = title
-            )
+    fun hostOf(url: String): String {
+        return try {
+            URI(url).host?.removePrefix("www.") ?: ""
+        } catch (_: Exception) {
+            ""
         }
     }
 
-    fun buildMarkdownReport(reports: List<WorkReport>): String {
-        return reports.joinToString("\n---\n\n") { r ->
-            val sb = StringBuilder()
-            sb.append("# ${r.prompt}\n\n")
-            sb.append("模式：${r.mode} | 模型：${r.model} | effort：${r.effort} | 联网：${r.web} | 本地工具：${r.localTools} | 设备/Shell：${r.deviceTools}\n")
-            if (r.plan.isNotBlank()) {
-                sb.append("\n## 计划\n\n${r.plan}\n")
-            }
-            if (r.toolsLog.isNotBlank()) {
-                sb.append("\n## 本地工具记录\n\n```\n${r.toolsLog.trim()}\n```\n")
-            }
-            sb.append("\n## 交付物\n\n${r.answer?.content ?: ""}\n")
-            val sources = sourceList(r.answer)
-            sb.append("\n## 来源\n\n")
-            if (sources.isNotEmpty()) {
-                sb.append(
-                    sources.joinToString("\n") { s ->
-                        val cleanTitle = s.title.replace("[", "").replace("]", "")
-                        "- [$cleanTitle](${s.url})"
-                    }
-                )
-                sb.append("\n")
-            }
-            if (r.review.isNotBlank()) {
-                sb.append("\n## 文本审查（非独立联网核查）\n\n${r.review}\n")
-            }
-            sb.append("\n## 用量\n\n")
-            sb.append(
-                r.usages.mapIndexed { idx, u ->
-                    "- 第 ${idx + 1} 次：${usageText(u, r.model)}"
-                }.joinToString("\n")
-            )
-            sb.append("\n")
-            sb.toString()
-        }
-    }
-
-    private fun toolCallToJson(tc: ToolCallRecord): JSONObject =
-        JSONObject()
-            .put("id", tc.id)
-            .put("name", tc.name)
-            .put("arguments", tc.arguments)
-            .put("result", tc.result)
-
-    private fun jsonToToolCall(obj: JSONObject): ToolCallRecord =
-        ToolCallRecord(
-            id = obj.optString("id"),
-            name = obj.optString("name"),
-            arguments = obj.optString("arguments"),
-            result = obj.optString("result")
-        )
-
-    private fun protocolMessageToJson(msg: ProtocolMessage): JSONObject {
-        val obj = JSONObject()
-            .put("role", msg.role)
-            .put("content", msg.content)
-            .put("reasoningContent", msg.reasoningContent)
-        if (msg.serverToolCallsJson != null) {
-            obj.put("serverToolCallsJson", msg.serverToolCallsJson)
-        }
-        if (msg.annotationsJson != null) {
-            obj.put("annotationsJson", msg.annotationsJson)
-        }
-        if (msg.localToolCalls.isNotEmpty()) {
-            val arr = JSONArray()
-            msg.localToolCalls.forEach { arr.put(toolCallToJson(it)) }
-            obj.put("localToolCalls", arr)
-        }
-        return obj
-    }
-
-    private fun jsonToProtocolMessage(obj: JSONObject): ProtocolMessage {
-        val ltcArr = obj.optJSONArray("localToolCalls")
-        val ltc = mutableListOf<ToolCallRecord>()
-        if (ltcArr != null) {
-            for (i in 0 until ltcArr.length()) {
-                ltcArr.optJSONObject(i)?.let { ltc.add(jsonToToolCall(it)) }
-            }
-        }
-        return ProtocolMessage(
-            role = obj.optString("role", "user"),
-            content = obj.optString("content", ""),
-            reasoningContent = obj.optString("reasoningContent", ""),
-            serverToolCallsJson = obj.optJSONArray("serverToolCallsJson"),
-            annotationsJson = obj.optJSONArray("annotationsJson"),
-            localToolCalls = ltc
-        )
-    }
-
-    private fun usageToJson(u: TokenUsage?): JSONObject? {
-        if (u == null) return null
-        val obj = JSONObject()
-            .put("promptTokens", u.promptTokens)
-            .put("completionTokens", u.completionTokens)
-            .put("cacheHitTokens", u.cacheHitTokens)
-            .put("reasoningTokens", u.reasoningTokens)
-            .put("toolSearchCount", u.toolSearchCount)
-            .put("toolImageSearchCount", u.toolImageSearchCount)
-            .put("toolFetchCount", u.toolFetchCount)
-        if (u.cacheMissTokens != null) {
-            obj.put("cacheMissTokens", u.cacheMissTokens)
-        }
-        return obj
-    }
-
-    private fun jsonToUsage(obj: JSONObject?): TokenUsage? {
-        if (obj == null) return null
-        return TokenUsage(
-            promptTokens = obj.optLong("promptTokens", 0L),
-            completionTokens = obj.optLong("completionTokens", 0L),
-            cacheHitTokens = obj.optLong("cacheHitTokens", 0L),
-            cacheMissTokens = if (obj.has("cacheMissTokens") && !obj.isNull("cacheMissTokens")) {
-                obj.optLong("cacheMissTokens")
-            } else null,
-            reasoningTokens = obj.optLong("reasoningTokens", 0L),
-            toolSearchCount = obj.optInt("toolSearchCount", 0),
-            toolImageSearchCount = obj.optInt("toolImageSearchCount", 0),
-            toolFetchCount = obj.optInt("toolFetchCount", 0)
-        )
-    }
-
-    fun serializeSession(snapshot: SessionSnapshot): String {
+    fun serializeSessionsStore(
+        sessions: List<ConversationSession>,
+        activeSessionId: String
+    ): String {
         val root = JSONObject()
-        root.put("convTitle", snapshot.convTitle)
-        root.put("mode", snapshot.mode.id)
-        root.put("showTaskPanel", snapshot.showTaskPanel)
-        root.put("activeWorkStep", snapshot.activeWorkStep)
-        root.put("taskStatusText", snapshot.taskStatusText)
-        root.put("planText", snapshot.planText)
-        root.put("toolsLogText", snapshot.toolsLogText)
-        root.put("reviewText", snapshot.reviewText)
-
-        val msgArr = JSONArray()
-        snapshot.messages.forEach { m ->
-            val mObj = JSONObject()
-                .put("id", m.id)
-                .put("role", m.role)
-                .put("content", m.content)
-                .put("reasoningContent", m.reasoningContent)
-            if (m.usageText != null) mObj.put("usageText", m.usageText)
-            if (m.incompleteNote != null) mObj.put("incompleteNote", m.incompleteNote)
-
-            if (m.citations.isNotEmpty()) {
-                val cArr = JSONArray()
-                m.citations.forEach { c ->
-                    cArr.put(
-                        JSONObject()
-                            .put("startIndex", c.startIndex)
-                            .put("endIndex", c.endIndex)
-                            .put("url", c.url)
-                            .put("title", c.title)
-                            .put("number", c.number)
-                    )
-                }
-                mObj.put("citations", cArr)
-            }
-            if (m.sources.isNotEmpty()) {
-                val sArr = JSONArray()
-                m.sources.forEach { s ->
-                    sArr.put(JSONObject().put("url", s.url).put("title", s.title))
-                }
-                mObj.put("sources", sArr)
-            }
-            if (m.localToolCalls.isNotEmpty()) {
-                val tArr = JSONArray()
-                m.localToolCalls.forEach { tArr.put(toolCallToJson(it)) }
-                mObj.put("localToolCalls", tArr)
-            }
-            msgArr.put(mObj)
+        root.put("version", 2)
+        root.put("active_session_id", activeSessionId)
+        val sessionsArr = JSONArray()
+        for (s in sessions) {
+            sessionsArr.put(serializeSingleSessionObject(s))
         }
-        root.put("messages", msgArr)
-
-        val histArr = JSONArray()
-        snapshot.history.forEach { histArr.put(protocolMessageToJson(it)) }
-        root.put("history", histArr)
-
-        val repArr = JSONArray()
-        snapshot.reports.forEach { r ->
-            val rObj = JSONObject()
-                .put("prompt", r.prompt)
-                .put("mode", r.mode)
-                .put("model", r.model)
-                .put("effort", r.effort)
-                .put("web", r.web)
-                .put("localTools", r.localTools)
-                .put("deviceTools", r.deviceTools)
-                .put("plan", r.plan)
-                .put("toolsLog", r.toolsLog)
-                .put("review", r.review)
-            if (r.answer != null) {
-                rObj.put("answer", protocolMessageToJson(r.answer))
-            }
-            val uArr = JSONArray()
-            r.usages.forEach { u ->
-                uArr.put(usageToJson(u) ?: JSONObject.NULL)
-            }
-            rObj.put("usages", uArr)
-            repArr.put(rObj)
-        }
-        root.put("reports", repArr)
+        root.put("sessions", sessionsArr)
         return root.toString()
     }
 
-    fun deserializeSession(raw: String): SessionSnapshot? {
-        if (raw.isBlank()) return null
+    fun deserializeSessionsStore(rawJson: String): Pair<List<ConversationSession>, String?> {
+        if (rawJson.isBlank()) return emptyList<ConversationSession>() to null
         return try {
-            val root = JSONObject(raw)
-            val modeStr = root.optString("mode", "chat")
-            val mode = if (modeStr == "work") WorkMode.WORK else WorkMode.CHAT
-
-            val messages = mutableListOf<UiChatMessage>()
-            val msgArr = root.optJSONArray("messages")
-            if (msgArr != null) {
-                for (i in 0 until msgArr.length()) {
-                    val mObj = msgArr.optJSONObject(i) ?: continue
-                    val citations = mutableListOf<CitationPoint>()
-                    val cArr = mObj.optJSONArray("citations")
-                    if (cArr != null) {
-                        for (j in 0 until cArr.length()) {
-                            val c = cArr.optJSONObject(j) ?: continue
-                            citations.add(
-                                CitationPoint(
-                                    startIndex = c.optInt("startIndex"),
-                                    endIndex = c.optInt("endIndex"),
-                                    url = c.optString("url"),
-                                    title = c.optString("title"),
-                                    number = c.optInt("number", j + 1)
-                                )
-                            )
-                        }
-                    }
-                    val sources = mutableListOf<SourceLink>()
-                    val sArr = mObj.optJSONArray("sources")
-                    if (sArr != null) {
-                        for (j in 0 until sArr.length()) {
-                            val s = sArr.optJSONObject(j) ?: continue
-                            sources.add(
-                                SourceLink(
-                                    url = s.optString("url"),
-                                    title = s.optString("title")
-                                )
-                            )
-                        }
-                    }
-                    val localTools = mutableListOf<ToolCallRecord>()
-                    val tArr = mObj.optJSONArray("localToolCalls")
-                    if (tArr != null) {
-                        for (j in 0 until tArr.length()) {
-                            tArr.optJSONObject(j)?.let { localTools.add(jsonToToolCall(it)) }
-                        }
-                    }
-                    messages.add(
-                        UiChatMessage(
-                            id = mObj.optLong("id", (i + 1).toLong()),
-                            role = mObj.optString("role", "user"),
-                            content = mObj.optString("content", ""),
-                            reasoningContent = mObj.optString("reasoningContent", ""),
-                            progressText = null,
-                            citations = citations,
-                            sources = sources,
-                            localToolCalls = localTools,
-                            usageText = if (mObj.has("usageText") && !mObj.isNull("usageText")) {
-                                mObj.optString("usageText")
-                            } else null,
-                            incompleteNote = if (mObj.has("incompleteNote") && !mObj.isNull("incompleteNote")) {
-                                mObj.optString("incompleteNote")
-                            } else null
-                        )
-                    )
-                }
+            val root = JSONObject(rawJson)
+            val activeId = root.optString("active_session_id", "").takeIf { it.isNotBlank() }
+            val sessionsArr = root.optJSONArray("sessions") ?: JSONArray()
+            val sessions = mutableListOf<ConversationSession>()
+            for (i in 0 until sessionsArr.length()) {
+                val obj = sessionsArr.optJSONObject(i) ?: continue
+                sessions.add(deserializeSingleSessionObject(obj))
             }
-
-            val history = mutableListOf<ProtocolMessage>()
-            val histArr = root.optJSONArray("history")
-            if (histArr != null) {
-                for (i in 0 until histArr.length()) {
-                    histArr.optJSONObject(i)?.let { history.add(jsonToProtocolMessage(it)) }
-                }
-            }
-
-            val reports = mutableListOf<WorkReport>()
-            val repArr = root.optJSONArray("reports")
-            if (repArr != null) {
-                for (i in 0 until repArr.length()) {
-                    val rObj = repArr.optJSONObject(i) ?: continue
-                    val usages = mutableListOf<TokenUsage?>()
-                    val uArr = rObj.optJSONArray("usages")
-                    if (uArr != null) {
-                        for (j in 0 until uArr.length()) {
-                            if (uArr.isNull(j)) {
-                                usages.add(null)
-                            } else {
-                                usages.add(jsonToUsage(uArr.optJSONObject(j)))
-                            }
-                        }
-                    }
-                    reports.add(
-                        WorkReport(
-                            prompt = rObj.optString("prompt", ""),
-                            mode = rObj.optString("mode", "chat"),
-                            model = rObj.optString("model", "deepseek-flash"),
-                            effort = rObj.optString("effort", "high"),
-                            web = rObj.optBoolean("web", true),
-                            localTools = rObj.optBoolean("localTools", true),
-                            deviceTools = rObj.optBoolean("deviceTools", true),
-                            plan = rObj.optString("plan", ""),
-                            toolsLog = rObj.optString("toolsLog", ""),
-                            review = rObj.optString("review", ""),
-                            answer = rObj.optJSONObject("answer")?.let { jsonToProtocolMessage(it) },
-                            usages = usages
-                        )
-                    )
-                }
-            }
-
-            SessionSnapshot(
-                convTitle = root.optString("convTitle", "Fluorine"),
-                mode = mode,
-                messages = messages,
-                history = history,
-                reports = reports,
-                showTaskPanel = root.optBoolean("showTaskPanel", false),
-                activeWorkStep = root.optInt("activeWorkStep", -1),
-                taskStatusText = root.optString("taskStatusText", "准备开始"),
-                planText = root.optString("planText", ""),
-                toolsLogText = root.optString("toolsLogText", ""),
-                reviewText = root.optString("reviewText", "")
-            )
+            sessions to activeId
         } catch (_: Exception) {
-            null
+            emptyList<ConversationSession>() to null
+        }
+    }
+
+    private fun serializeSingleSessionObject(session: ConversationSession): JSONObject {
+        val obj = JSONObject()
+        obj.put("id", session.id)
+        obj.put("title", session.title)
+        obj.put("mode", session.mode)
+        obj.put("created_at", session.createdAt)
+        obj.put("updated_at", session.updatedAt)
+
+        val msgArr = JSONArray()
+        for (m in session.chatMessages) {
+            val mObj = JSONObject()
+                .put("id", m.id)
+                .put("role", m.role)
+                .put("text", m.text)
+                .put("tags", JSONArray(m.tags))
+                .put("thinking", m.thinking)
+                .put("usageText", m.usageText)
+                .put("isError", m.isError)
+            val srcArr = JSONArray()
+            for (s in m.sources) {
+                srcArr.put(
+                    JSONObject()
+                        .put("title", s.title)
+                        .put("url", s.url)
+                        .put("snippet", s.snippet)
+                        .put("site_name", s.siteName)
+                        .put("published_at", s.publishedAt)
+                        .put("cite_index", s.citeIndex)
+                )
+            }
+            mObj.put("sources", srcArr)
+
+            val tcArr = JSONArray()
+            for (tc in m.localToolCalls) {
+                tcArr.put(
+                    JSONObject()
+                        .put("round", tc.round)
+                        .put("id", tc.id)
+                        .put("name", tc.name)
+                        .put("arguments", tc.arguments)
+                        .put("output", tc.output)
+                )
+            }
+            mObj.put("localToolCalls", tcArr)
+            msgArr.put(mObj)
+        }
+        obj.put("chatMessages", msgArr)
+
+        val ctxArr = JSONArray()
+        for (c in session.contextHistory) {
+            val cObj = JSONObject()
+                .put("role", c.role)
+                .put("content", c.content)
+            if (c.subturnMessages.isNotEmpty()) {
+                cObj.put("subturn_messages", JSONArray(c.subturnMessages))
+            }
+            ctxArr.put(cObj)
+        }
+        obj.put("contextHistory", ctxArr)
+        return obj
+    }
+
+    private fun deserializeSingleSessionObject(obj: JSONObject): ConversationSession {
+        val msgList = mutableListOf<ChatMessage>()
+        val msgArr = obj.optJSONArray("chatMessages") ?: JSONArray()
+        for (i in 0 until msgArr.length()) {
+            val m = msgArr.optJSONObject(i) ?: continue
+            val tags = mutableListOf<String>()
+            val tArr = m.optJSONArray("tags") ?: JSONArray()
+            for (j in 0 until tArr.length()) tags.add(tArr.optString(j))
+
+            val sources = mutableListOf<SearchSource>()
+            val sArr = m.optJSONArray("sources") ?: JSONArray()
+            for (j in 0 until sArr.length()) {
+                val s = sArr.optJSONObject(j) ?: continue
+                sources.add(
+                    SearchSource(
+                        title = s.optString("title", ""),
+                        url = s.optString("url", ""),
+                        snippet = s.optString("snippet", ""),
+                        siteName = s.optString("site_name", ""),
+                        publishedAt = s.optString("published_at", ""),
+                        citeIndex = if (s.has("cite_index") && !s.isNull("cite_index")) s.optInt("cite_index") else null
+                    )
+                )
+            }
+
+            val toolCalls = mutableListOf<LocalToolCallRecord>()
+            val tcArr = m.optJSONArray("localToolCalls") ?: JSONArray()
+            for (j in 0 until tcArr.length()) {
+                val tc = tcArr.optJSONObject(j) ?: continue
+                toolCalls.add(
+                    LocalToolCallRecord(
+                        round = tc.optInt("round", 1),
+                        id = tc.optString("id", ""),
+                        name = tc.optString("name", ""),
+                        arguments = tc.optString("arguments", "{}"),
+                        output = tc.optString("output", "")
+                    )
+                )
+            }
+
+            msgList.add(
+                ChatMessage(
+                    id = m.optString("id", "msg_$i"),
+                    role = m.optString("role", "assistant"),
+                    text = m.optString("text", ""),
+                    tags = tags,
+                    thinking = m.optString("thinking", ""),
+                    sources = sources,
+                    localToolCalls = toolCalls,
+                    usageText = m.optString("usageText", ""),
+                    isError = m.optBoolean("isError", false)
+                )
+            )
+        }
+
+        val ctxList = mutableListOf<ContextTurn>()
+        val ctxArr = obj.optJSONArray("contextHistory") ?: JSONArray()
+        for (i in 0 until ctxArr.length()) {
+            val c = ctxArr.optJSONObject(i) ?: continue
+            val subturns = mutableListOf<String>()
+            val subArr = c.optJSONArray("subturn_messages")
+            if (subArr != null) {
+                for (j in 0 until subArr.length()) {
+                    val s = subArr.optString(j, "")
+                    if (s.isNotBlank()) subturns.add(s)
+                }
+            }
+            ctxList.add(
+                ContextTurn(
+                    role = c.optString("role", "user"),
+                    content = c.optString("content", ""),
+                    subturnMessages = subturns
+                )
+            )
+        }
+
+        val now = System.currentTimeMillis()
+        return ConversationSession(
+            id = obj.optString("id", "session_$now"),
+            title = obj.optString("title", "未命名会话"),
+            mode = obj.optString("mode", "chat"),
+            createdAt = obj.optLong("created_at", now),
+            updatedAt = obj.optLong("updated_at", now),
+            chatMessages = msgList,
+            contextHistory = ctxList
+        )
+    }
+
+    fun serializeSession(
+        chatMessages: List<ChatMessage>,
+        contextHistory: List<ContextTurn>
+    ): String {
+        val tempSession = ConversationSession(
+            id = "default",
+            title = "默认会话",
+            chatMessages = chatMessages,
+            contextHistory = contextHistory
+        )
+        return serializeSingleSessionObject(tempSession).toString()
+    }
+
+    fun deserializeSession(rawJson: String): Pair<List<ChatMessage>, List<ContextTurn>> {
+        if (rawJson.isBlank()) return emptyList<ChatMessage>() to emptyList()
+        return try {
+            val s = deserializeSingleSessionObject(JSONObject(rawJson))
+            s.chatMessages to s.contextHistory
+        } catch (_: Exception) {
+            emptyList<ChatMessage>() to emptyList()
         }
     }
 }
-

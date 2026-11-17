@@ -1,51 +1,109 @@
 <resources>
     <string name="app_name">Fluorine</string>
     <string name="app_subtitle">DeepSeek 本地工作台</string>
-    <string name="mode_chat_title">Chat</string>
-    <string name="mode_work_title">Work</string>
-    <string name="new_chat">新会话</string>
-    <string name="settings_connect">设置</string>
+
+    <!-- Header & Navigation Drawer (RikkaHub style) -->
+    <string name="drawer_title">历史会话</string>
+    <string name="drawer_new_session">新建会话</string>
+    <string name="drawer_empty">暂无历史会话</string>
+    <string name="drawer_search_hint">搜索历史会话…</string>
+    <string name="drawer_workspace_files">工作区生成文件</string>
+    <string name="drawer_open_settings">设置</string>
+    <string name="drawer_delete_session">删除会话</string>
+    <string name="drawer_rename_session">重命名会话</string>
+
+    <!-- Modes -->
+    <string name="mode_chat">Chat</string>
+    <string name="mode_chat_sub">对话</string>
+    <string name="mode_work">Work</string>
+    <string name="mode_work_sub">Agent</string>
+
+    <!-- Welcome -->
+    <string name="welcome_eyebrow">Fluorine</string>
+    <string name="welcome_title">想清楚，\n再动手执行。</string>
+    <string name="welcome_desc"></string>
+
+    <!-- Composer -->
     <string name="prompt_placeholder">输入问题或任务…</string>
-    <string name="empty_state_chat">Chat · 直接对话</string>
-    <string name="empty_state_work">Work · 计划 · 取证 · 本地执行 · 审查</string>
-    <string name="toggle_web">联网</string>
-    <string name="toggle_local_tools">本地工具</string>
-    <string name="toggle_device_tools">设备/Shell</string>
-    <string name="action_send">发送</string>
-    <string name="action_stop">停止</string>
-    <string name="action_export_md">导出</string>
-    <string name="action_share_md">分享</string>
+    <string name="toggle_web">联网搜索</string>
+    <string name="toggle_thinking">深度思考</string>
+    <string name="send_action">发送</string>
+    <string name="sending_action">执行中…</string>
+
+    <!-- Message & Artifacts -->
+    <string name="role_user">用户</string>
+    <string name="role_assistant">Fluorine</string>
+    <string name="thinking_header">深度思考过程</string>
+    <string name="local_tools_header">本地工具调用</string>
+    <string name="sources_header">引用来源</string>
+    <string name="workspace_file_generated">已生成工作区文件</string>
+    <string name="workspace_file_edited">已更新工作区文件</string>
+    <string name="workspace_file_export">导出</string>
+    <string name="workspace_file_share">分享</string>
+    <string name="workspace_file_preview">预览</string>
+    <string name="workspace_files_dialog_title">工作区产物与文件管理</string>
+    <string name="workspace_files_empty">工作区暂无生成文件（模型调用 fs_write 生成的文件会显示在此处与对应消息卡片上）</string>
     <string name="action_copy">复制</string>
-    <string name="action_copied">已复制</string>
-    <string name="workspace_heading">WORKFLOW</string>
-    <string name="step_1">01 计划</string>
-    <string name="step_2">02 取证</string>
-    <string name="step_3">03 执行</string>
-    <string name="step_4">04 审查</string>
-    <string name="section_plan">任务计划</string>
-    <string name="section_tools">本地工具调用记录</string>
-    <string name="section_review">审查记录</string>
-    <string name="thinking_process">思考过程</string>
-    <string name="sources_label">引用来源</string>
-    <string name="local_tools_label">本地工具调用</string>
-    <string name="settings_title">配置与连接</string>
-    <string name="settings_desc">配置与当前会话自动持久化保存在本机应用私有沙箱中。</string>
-    <string name="settings_api_key">DeepSeek API Key</string>
-    <string name="settings_api_key_hint">sk-…</string>
-    <string name="settings_model">模型</string>
-    <string name="settings_effort">思考强度</string>
-    <string name="settings_budget">输出预算（含思考）</string>
-    <string name="settings_storage_toggle">允许只读访问 /sdcard 共享存储</string>
-    <string name="settings_storage_desc">开启后 fs_list / fs_read / fs_search 可只读访问 /sdcard（永不修改工作区外文件）</string>
-    <string name="settings_discover">检测本机与模型</string>
-    <string name="settings_clear_local">清除本地数据</string>
-    <string name="settings_done">完成</string>
-    <string name="settings_fine">直连 api.deepseek.com（零本地 HTTP 端口暴露）。Key 与对话持久化于本机私有目录，可随时清除。</string>
-    <string name="label_you">YOU</string>
-    <string name="label_error">未完成</string>
-    <string name="tool_detail_title">工具调用详情</string>
-    <string name="tool_detail_args">调用参数 (Arguments)</string>
-    <string name="tool_detail_result">返回结果 (Result)</string>
-    <string name="cd_toggle_key_visibility">显示或隐藏 API Key</string>
-    <string name="cd_close_dialog">关闭弹窗</string>
+    <string name="action_retry">重试</string>
+    <string name="msg_copied">已复制到剪贴板</string>
+
+    <!-- Agent Panel -->
+    <string name="task_panel_title">AGENT WORKSPACE</string>
+
+    <!-- Settings (Comprehensive) -->
+    <string name="settings_title">全局设置</string>
+    <string name="settings_tab_appearance">外观与显示</string>
+    <string name="settings_tab_connection">连接与网络</string>
+    <string name="settings_tab_model">模型与推理</string>
+    <string name="settings_tab_agent">Agent与提示词</string>
+    <string name="settings_tab_workspace">工作区与终端</string>
+    <string name="settings_tab_data">日志与数据导出</string>
+
+    <string name="settings_theme_label">界面主题（默认暗色 / 白色可切换）</string>
+    <string name="theme_dark">暗色模式</string>
+    <string name="theme_light">白色模式</string>
+    <string name="theme_system">跟随系统</string>
+
+    <string name="settings_render_markdown">启用 Markdown 富文本渲染</string>
+    <string name="settings_render_latex">启用 LaTeX 数学公式渲染 ($…$ / $$…$$)</string>
+    <string name="settings_default_expand_thinking">默认展开思考过程</string>
+    <string name="settings_default_expand_tools">默认展开工具调用记录</string>
+
+    <string name="settings_key_label">DeepSeek API Key</string>
+    <string name="settings_key_hint">sk-…</string>
+    <string name="settings_remember_key">在本地安全保存 API Key</string>
+    <string name="settings_base_url_label">API Base URL（支持自定义兼容端点）</string>
+    <string name="settings_base_url_hint">https://api.deepseek.com</string>
+
+    <string name="settings_model_label">预设模型选择</string>
+    <string name="settings_custom_model_label">自定义模型 ID（留空则使用上方预设模型）</string>
+    <string name="settings_custom_model_hint">例如 deepseek-flash、deepseek-v4-pro 或自定义模型名</string>
+    <string name="settings_thinking_mode_label">思考模式策略 (thinking.type)</string>
+    <string name="settings_effort_label">推理强度 (reasoning.effort)</string>
+    <string name="settings_max_tokens_label">最大输出 Token 预算 (max_tokens)</string>
+    <string name="settings_custom_max_tokens_label">自定义最大输出 Token (256 ~ 393216)</string>
+    <string name="settings_unlock_web_label">允许任意模型尝试启用内置联网搜索</string>
+
+    <string name="settings_max_tool_rounds_label">单次任务最大工具调用轮数</string>
+    <string name="settings_max_history_label">携带历史上下文轮数上限</string>
+    <string name="settings_latest_reminder_label">注入 latest_reminder 元信息提示</string>
+    <string name="settings_auto_title_label">自动根据首条消息生成会话标题</string>
+    <string name="settings_chat_prompt_label">Chat 模式自定义 System Prompt（留空使用内置默认）</string>
+    <string name="settings_work_prompt_label">Work 模式自定义 System Prompt（留空使用内置默认）</string>
+    <string name="settings_reset_prompts">恢复默认提示词</string>
+
+    <string name="settings_sdcard_label">允许只读访问 /sdcard 外部存储</string>
+    <string name="settings_shell_timeout_label">本地命令执行超时（秒）</string>
+
+    <string name="settings_discover_btn">探测模型与本地工具能力</string>
+    <string name="settings_discovering">正在探测…</string>
+
+    <string name="settings_export_history_json">导出全部聊天历史 (.json)</string>
+    <string name="settings_export_history_md">导出全部聊天历史 (.md)</string>
+    <string name="settings_import_history_json">导入聊天历史 (.json)</string>
+    <string name="settings_export_logs">导出应用运行日志 (.log)</string>
+    <string name="settings_view_logs">查看实时运行日志</string>
+    <string name="settings_clear_session">清空当前会话</string>
+    <string name="settings_save">保存设置</string>
+    <string name="settings_cancel">取消</string>
 </resources>

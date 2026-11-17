@@ -1,14 +1,14 @@
 package com.uronic0x.fluorine.ui.components
 
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
-import android.content.Intent
-import android.net.Uri
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,75 +18,74 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.ClickableText
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.ExpandLess
-import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.outlined.Build
+import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.Description
+import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.ExpandLess
+import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Language
+import androidx.compose.material.icons.outlined.Psychology
+import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Share
+import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.uronic0x.fluorine.R
-import com.uronic0x.fluorine.protocol.CitationPoint
+import com.uronic0x.fluorine.protocol.ChatMessage
 import com.uronic0x.fluorine.protocol.CoreProtocol
-import com.uronic0x.fluorine.protocol.ToolCallRecord
-import com.uronic0x.fluorine.protocol.UiChatMessage
-import com.uronic0x.fluorine.protocol.WorkMode
-import com.uronic0x.fluorine.ui.theme.JetBrainsMono
+import com.uronic0x.fluorine.protocol.LocalToolCallRecord
+import com.uronic0x.fluorine.protocol.SearchSource
+import com.uronic0x.fluorine.protocol.WorkspaceFileArtifact
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 @Composable
-fun MinimalEmptyState(
-    mode: WorkMode,
+fun WelcomeSection(
     modifier: Modifier = Modifier
 ) {
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .padding(vertical = 96.dp)
-            .testTag("minimal_empty_state"),
-        contentAlignment = Alignment.Center
+            .padding(top = 84.dp, bottom = 48.dp, start = 12.dp, end = 12.dp),
+        contentAlignment = Alignment.CenterStart
     ) {
         Text(
-            text = if (mode == WorkMode.WORK) {
-                stringResource(R.string.empty_state_work)
-            } else {
-                stringResource(R.string.empty_state_chat)
-            },
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
+            text = stringResource(R.string.welcome_title),
+            style = MaterialTheme.typography.headlineLarge,
+            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.88f)
         )
     }
 }
@@ -94,373 +93,661 @@ fun MinimalEmptyState(
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun MessageItemCard(
-    message: UiChatMessage,
-    displayName: String,
-    onToolBadgeClick: (ToolCallRecord) -> Unit,
-    onCopyStatus: (String) -> Unit,
+    message: ChatMessage,
+    enableMarkdown: Boolean = true,
+    enableLatex: Boolean = true,
+    defaultExpandThinking: Boolean = false,
+    defaultExpandTools: Boolean = false,
+    defaultExpandSources: Boolean = false,
+    onExportWorkspaceFile: (WorkspaceFileArtifact) -> Unit = {},
+    onShareWorkspaceFile: (WorkspaceFileArtifact) -> Unit = {},
+    onPreviewWorkspaceFile: (WorkspaceFileArtifact) -> Unit = {},
+    onRetryMessage: ((ChatMessage) -> Unit)? = null,
+    onOutsideTap: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    val context = LocalContext.current
     val isUser = message.role == "user"
-    val isError = message.role == "error"
-    val borderColor = MaterialTheme.colorScheme.outlineVariant
+    val clipboard = LocalClipboardManager.current
+    val scope = rememberCoroutineScope()
+    var copied by remember { mutableStateOf(false) }
 
-    var thinkingExpanded by remember(message.id) { mutableStateOf(false) }
-    var copiedRecently by remember(message.id) { mutableStateOf(false) }
-
-    LaunchedEffect(copiedRecently) {
-        if (copiedRecently) {
-            delay(1500)
-            copiedRecently = false
-        }
+    val artifacts = remember(message.localToolCalls) {
+        CoreProtocol.extractWorkspaceArtifacts(message.localToolCalls)
     }
 
-    Column(
+    val containerColor = if (isUser) {
+        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f)
+    } else {
+        MaterialTheme.colorScheme.surface
+    }
+    val borderColor = if (isUser) {
+        MaterialTheme.colorScheme.outline
+    } else {
+        MaterialTheme.colorScheme.outlineVariant
+    }
+
+    Surface(
         modifier = modifier
             .fillMaxWidth()
-            .then(
-                if (isUser) {
-                    val accentBorder = MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
-                    Modifier
-                        .padding(top = 14.dp)
-                        .drawBehind {
-                            drawLine(
-                                color = accentBorder,
-                                start = Offset(0f, 0f),
-                                end = Offset(0f, size.height),
-                                strokeWidth = 2.5.dp.toPx()
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onOutsideTap
+            ),
+        shape = RoundedCornerShape(14.dp),
+        color = containerColor,
+        border = BorderStroke(1.dp, borderColor)
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            // Header row: role badge + status tags + copy/retry actions
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.Center,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(
+                        text = if (isUser) stringResource(R.string.role_user) else stringResource(R.string.role_assistant),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (isUser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                    )
+                    message.tags.forEach { tag ->
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            shape = RoundedCornerShape(6.dp)
+                        ) {
+                            Text(
+                                text = tag,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                             )
                         }
-                        .padding(start = 16.dp, top = 6.dp, bottom = 14.dp, end = 4.dp)
-                } else {
-                    Modifier.padding(vertical = 14.dp, horizontal = 4.dp)
-                }
-            )
-            .testTag("message_item_${message.id}")
-    ) {
-        val roleText = when (message.role) {
-            "user" -> stringResource(R.string.label_you)
-            "error" -> stringResource(R.string.label_error)
-            else -> displayName
-        }
-        Text(
-            text = roleText,
-            style = MaterialTheme.typography.labelSmall,
-            color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
-        )
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        if (message.reasoningContent.isNotBlank()) {
-            Surface(
-                shape = RoundedCornerShape(10.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.75f),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 12.dp)
-            ) {
-                Column(modifier = Modifier.fillMaxWidth()) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { thinkingExpanded = !thinkingExpanded }
-                            .padding(horizontal = 12.dp, vertical = 9.dp)
-                            .testTag("thinking_toggle_${message.id}"),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(
-                            text = stringResource(R.string.thinking_process),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Icon(
-                            imageVector = if (thinkingExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                            contentDescription = stringResource(R.string.thinking_process),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(18.dp)
-                        )
                     }
-                    AnimatedVisibility(visible = thinkingExpanded) {
-                        Text(
-                            text = message.reasoningContent,
-                            style = MaterialTheme.typography.bodyMedium.copy(
-                                fontFamily = JetBrainsMono,
-                                fontSize = 11.5.sp,
-                                lineHeight = 19.sp
-                            ),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                }
+
+                if (message.text.isNotBlank()) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
                             modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(start = 12.dp, end = 12.dp, bottom = 10.dp)
-                        )
+                                .clip(RoundedCornerShape(6.dp))
+                                .clickable {
+                                    clipboard.setText(AnnotatedString(message.text))
+                                    copied = true
+                                    scope.launch {
+                                        delay(1500)
+                                        copied = false
+                                    }
+                                }
+                                .padding(horizontal = 6.dp, vertical = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(3.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (copied) Icons.Outlined.Check else Icons.Outlined.ContentCopy,
+                                contentDescription = stringResource(R.string.action_copy),
+                                modifier = Modifier.size(13.dp),
+                                tint = if (copied) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            if (copied) {
+                                Text(
+                                    text = stringResource(R.string.msg_copied),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
+
+                        if (isUser && onRetryMessage != null) {
+                            Row(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .clickable { onRetryMessage(message) }
+                                    .padding(horizontal = 6.dp, vertical = 3.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.Refresh,
+                                    contentDescription = stringResource(R.string.action_retry),
+                                    modifier = Modifier.size(13.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
                     }
                 }
             }
-        }
 
-        if (message.content.isNotEmpty()) {
-            AnswerTextWithCitations(
-                content = message.content,
-                citations = message.citations,
-                isError = isError,
-                context = context
-            )
-        }
-
-        if (!message.progressText.isNullOrBlank()) {
-            Spacer(modifier = Modifier.height(8.dp))
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(7.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primary)
+            // 1. Collapsible Thinking Process
+            if (message.thinking.isNotBlank()) {
+                CollapsibleThinkingBox(
+                    thinking = message.thinking,
+                    initialExpanded = defaultExpandThinking
                 )
+            }
+
+            // 2. Collapsible Local Tool Calls
+            if (message.localToolCalls.isNotEmpty()) {
+                CollapsibleToolCallsBox(
+                    toolCalls = message.localToolCalls,
+                    initialExpanded = defaultExpandTools
+                )
+            }
+
+            // 3. Generated / Modified Workspace File Artifacts (Requirement #1: Rounded-Corner UI + Export)
+            if (artifacts.isNotEmpty()) {
+                WorkspaceArtifactsSection(
+                    artifacts = artifacts,
+                    onExport = onExportWorkspaceFile,
+                    onShare = onShareWorkspaceFile,
+                    onPreview = onPreviewWorkspaceFile
+                )
+            }
+
+            // 4. Main Message Content (Markdown + LaTeX Formula Rendering)
+            if (message.text.isNotBlank()) {
+                MarkdownMathText(
+                    text = message.text,
+                    citations = message.citations,
+                    enableMarkdown = enableMarkdown,
+                    enableLatex = enableLatex,
+                    baseStyle = MaterialTheme.typography.bodyLarge,
+                    textColor = if (message.isError) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurface
+                    },
+                    onOutsideTap = onOutsideTap
+                )
+            }
+
+            // 5. Collapsible Search Sources (Requirement #9: Collapsed by Default)
+            if (message.sources.isNotEmpty()) {
+                CollapsibleSourcesSection(
+                    sources = message.sources,
+                    initialExpanded = defaultExpandSources
+                )
+            }
+
+            // 6. Token Usage & Cache Hit Footer
+            if (message.usageText.isNotBlank()) {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
                 Text(
-                    text = message.progressText,
-                    style = MaterialTheme.typography.labelMedium,
+                    text = message.usageText,
+                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }
+    }
+}
 
-        if (!message.incompleteNote.isNullOrBlank()) {
-            Spacer(modifier = Modifier.height(6.dp))
-            Text(
-                text = message.incompleteNote,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.error
-            )
-        }
-
-        if (message.localToolCalls.isNotEmpty()) {
-            Spacer(modifier = Modifier.height(12.dp))
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.fillMaxWidth()
+@Composable
+private fun WorkspaceArtifactsSection(
+    artifacts: List<WorkspaceFileArtifact>,
+    onExport: (WorkspaceFileArtifact) -> Unit,
+    onShare: (WorkspaceFileArtifact) -> Unit,
+    onPreview: (WorkspaceFileArtifact) -> Unit
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        artifacts.forEach { artifact ->
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("workspace_artifact_${artifact.fileName}"),
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f))
             ) {
-                message.localToolCalls.forEachIndexed { idx, tc ->
-                    val badgeText = CoreProtocol.clipText("${tc.name}(${tc.arguments}) → ${tc.result}", 72)
-                    Surface(
-                        shape = RoundedCornerShape(6.dp),
-                        color = MaterialTheme.colorScheme.secondaryContainer,
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                        modifier = Modifier
-                            .clickable { onToolBadgeClick(tc) }
-                            .testTag("tool_badge_${message.id}_$idx")
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier.weight(1f)
                     ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
+                            modifier = Modifier.size(38.dp)
                         ) {
-                            Icon(
-                                imageVector = Icons.Outlined.Build,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onSecondaryContainer,
-                                modifier = Modifier.size(13.dp)
-                            )
-                            Text(
-                                text = badgeText,
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    fontFamily = JetBrainsMono,
-                                    fontSize = 11.5.sp
-                                ),
-                                color = MaterialTheme.colorScheme.onSecondaryContainer
-                            )
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.Outlined.Description,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
                         }
-                    }
-                }
-            }
-        }
 
-        if (message.sources.isNotEmpty()) {
-            Spacer(modifier = Modifier.height(12.dp))
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                message.sources.forEachIndexed { i, src ->
-                    Surface(
-                        shape = RoundedCornerShape(6.dp),
-                        color = MaterialTheme.colorScheme.surface,
-                        border = BorderStroke(1.dp, borderColor),
-                        modifier = Modifier
-                            .clickable { openExternalUrl(context, src.url) }
-                            .testTag("source_chip_${message.id}_$i")
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(5.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Outlined.Language,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(13.dp)
-                            )
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text(
+                                    text = artifact.fileName,
+                                    style = MaterialTheme.typography.titleSmall.copy(fontFamily = FontFamily.Monospace),
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Surface(
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                                ) {
+                                    Text(
+                                        text = if (artifact.operation == "fs_edit") {
+                                            stringResource(R.string.workspace_file_edited)
+                                        } else {
+                                            stringResource(R.string.workspace_file_generated)
+                                        },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp)
+                                    )
+                                }
+                            }
                             Text(
-                                text = "${i + 1}. ${src.title}",
+                                text = buildString {
+                                    append(artifact.relativePath)
+                                    if (artifact.bytes > 0) {
+                                        append(" · ")
+                                        append(CoreProtocol.formatFileSize(artifact.bytes))
+                                    }
+                                },
                                 style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.primary,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
+
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Surface(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable { onPreview(artifact) },
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.surface,
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.Visibility,
+                                    contentDescription = stringResource(R.string.workspace_file_preview),
+                                    modifier = Modifier.size(14.dp),
+                                    tint = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = stringResource(R.string.workspace_file_preview),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        }
+
+                        Surface(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable { onShare(artifact) },
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.surface,
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                        ) {
+                            Box(modifier = Modifier.padding(horizontal = 7.dp, vertical = 5.dp)) {
+                                Icon(
+                                    imageVector = Icons.Outlined.Share,
+                                    contentDescription = stringResource(R.string.workspace_file_share),
+                                    modifier = Modifier.size(14.dp),
+                                    tint = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        }
+
+                        Surface(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable { onExport(artifact) }
+                                .testTag("export_artifact_${artifact.fileName}"),
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.primary
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.Download,
+                                    contentDescription = stringResource(R.string.workspace_file_export),
+                                    modifier = Modifier.size(14.dp),
+                                    tint = MaterialTheme.colorScheme.onPrimary
+                                )
+                                Text(
+                                    text = stringResource(R.string.workspace_file_export),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onPrimary
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
+    }
+}
 
-        if (!message.usageText.isNullOrBlank()) {
-            Spacer(modifier = Modifier.height(12.dp))
+@Composable
+private fun CollapsibleThinkingBox(
+    thinking: String,
+    initialExpanded: Boolean = false
+) {
+    var expanded by rememberSaveable { mutableStateOf(initialExpanded) }
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+    ) {
+        Column(modifier = Modifier.fillMaxWidth()) {
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded }
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = message.usageText,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.weight(1f)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Surface(
-                    shape = RoundedCornerShape(6.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
-                    modifier = Modifier
-                        .clickable {
-                            val copied = copyToClipboard(context, message.content)
-                            if (copied) {
-                                copiedRecently = true
-                            } else {
-                                onCopyStatus("剪贴板写入失败")
-                            }
-                        }
-                        .testTag("copy_btn_${message.id}")
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Icon(
-                            imageVector = if (copiedRecently) Icons.Default.Check else Icons.Default.ContentCopy,
-                            contentDescription = stringResource(R.string.action_copy),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(12.dp)
+                    Icon(
+                        imageVector = Icons.Outlined.Psychology,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = "${stringResource(R.string.thinking_header)} (${thinking.length} 字)",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Icon(
+                    imageVector = if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            AnimatedVisibility(
+                visible = expanded,
+                enter = expandVertically() + fadeIn(),
+                exit = shrinkVertically() + fadeOut()
+            ) {
+                Column {
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    Text(
+                        text = thinking,
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontFamily = FontFamily.Monospace,
+                            lineHeight = 18.sp
+                        ),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 280.dp)
+                            .verticalScroll(rememberScrollState())
+                            .padding(12.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CollapsibleToolCallsBox(
+    toolCalls: List<LocalToolCallRecord>,
+    initialExpanded: Boolean = false
+) {
+    var expanded by rememberSaveable { mutableStateOf(initialExpanded) }
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+    ) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded }
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Build,
+                        contentDescription = null,
+                        modifier = Modifier.size(15.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = "${stringResource(R.string.local_tools_header)} (${toolCalls.size})",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Icon(
+                    imageVector = if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            AnimatedVisibility(
+                visible = expanded,
+                enter = expandVertically() + fadeIn(),
+                exit = shrinkVertically() + fadeOut()
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 280.dp)
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    toolCalls.forEachIndexed { idx, call ->
+                        if (idx > 0) {
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        }
+                        Text(
+                            text = "[#${call.round}] ${call.name}(${call.arguments})",
+                            style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                            color = MaterialTheme.colorScheme.primary
                         )
                         Text(
-                            text = if (copiedRecently) stringResource(R.string.action_copied) else stringResource(R.string.action_copy),
-                            style = MaterialTheme.typography.labelSmall,
+                            text = "→ ${call.output}",
+                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
             }
         }
-
-        Spacer(modifier = Modifier.height(14.dp))
-        HorizontalDivider(color = borderColor)
     }
 }
 
-@Suppress("DEPRECATION")
 @Composable
-private fun AnswerTextWithCitations(
-    content: String,
-    citations: List<CitationPoint>,
-    isError: Boolean,
-    context: Context
+private fun CollapsibleSourcesSection(
+    sources: List<SearchSource>,
+    initialExpanded: Boolean = false
 ) {
-    val textColor = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onBackground
-    val accentColor = MaterialTheme.colorScheme.primary
+    val uriHandler = LocalUriHandler.current
+    var expanded by rememberSaveable { mutableStateOf(initialExpanded) }
 
-    if (citations.isEmpty()) {
-        Text(
-            text = content,
-            style = MaterialTheme.typography.bodyLarge,
-            color = textColor
-        )
-        return
-    }
-
-    val codePoints = remember(content) {
-        val list = mutableListOf<String>()
-        var i = 0
-        while (i < content.length) {
-            val cp = content.codePointAt(i)
-            val charCount = Character.charCount(cp)
-            list.add(content.substring(i, i + charCount))
-            i += charCount
-        }
-        list
-    }
-
-    val annotated = remember(content, citations, textColor, accentColor) {
-        buildAnnotatedString {
-            var start = 0
-            for (c in citations) {
-                val safeEnd = c.endIndex.coerceIn(0, codePoints.size)
-                if (safeEnd > start) {
-                    append(codePoints.subList(start, safeEnd).joinToString(""))
-                    start = safeEnd
-                }
-                pushStringAnnotation(tag = "URL", annotation = c.url)
-                withStyle(
-                    SpanStyle(
-                        color = accentColor,
-                        fontSize = 11.5.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        textDecoration = TextDecoration.Underline
-                    )
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+    ) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded }
+                    .testTag("toggle_sources_button")
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    append(" [${c.number}] ")
+                    Icon(
+                        imageVector = Icons.Outlined.Language,
+                        contentDescription = null,
+                        modifier = Modifier.size(15.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = "${stringResource(R.string.sources_header)} (${sources.size})",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
-                pop()
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = if (expanded) "收起" else "展开",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Icon(
+                        imageVector = if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
-            if (start < codePoints.size) {
-                append(codePoints.subList(start, codePoints.size).joinToString(""))
+
+            AnimatedVisibility(
+                visible = expanded,
+                enter = expandVertically() + fadeIn(),
+                exit = shrinkVertically() + fadeOut()
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 10.dp, end = 10.dp, bottom = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    sources.forEachIndexed { idx, src ->
+                        val refIndex = src.citeIndex ?: (idx + 1)
+                        val host = remember(src.url) { CoreProtocol.hostOf(src.url) }
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable(enabled = src.url.isNotBlank()) {
+                                    runCatching { uriHandler.openUri(src.url) }
+                                },
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.surface,
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Surface(
+                                        shape = RoundedCornerShape(4.dp),
+                                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+                                    ) {
+                                        Text(
+                                            text = "[$refIndex]",
+                                            style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                                            color = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                                        )
+                                    }
+                                    Text(
+                                        text = src.title.ifBlank { src.url.ifBlank { "引用来源" } },
+                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
+                                if (host.isNotBlank() || src.siteName.isNotBlank() || src.publishedAt.isNotBlank()) {
+                                    Text(
+                                        text = listOf(src.siteName, host, src.publishedAt)
+                                            .filter { it.isNotBlank() }
+                                            .distinct()
+                                            .joinToString(" · "),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                if (src.snippet.isNotBlank()) {
+                                    Text(
+                                        text = src.snippet,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
-    }
-
-    ClickableText(
-        text = annotated,
-        style = MaterialTheme.typography.bodyLarge.copy(color = textColor),
-        onClick = { offset ->
-            annotated.getStringAnnotations(tag = "URL", start = offset, end = offset)
-                .firstOrNull()
-                ?.let { ann -> openExternalUrl(context, ann.item) }
-        }
-    )
-}
-
-fun copyToClipboard(context: Context, text: String): Boolean {
-    return try {
-        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return false
-        cm.setPrimaryClip(ClipData.newPlainText("Fluorine", text))
-        true
-    } catch (_: Exception) {
-        false
-    }
-}
-
-fun openExternalUrl(context: Context, rawUrl: String) {
-    val safe = CoreProtocol.safeUrl(rawUrl) ?: return
-    runCatching {
-        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(safe)).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        context.startActivity(intent)
     }
 }

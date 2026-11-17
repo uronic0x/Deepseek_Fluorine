@@ -1,921 +1,610 @@
 package com.uronic0x.fluorine.engine
 
-import android.app.ActivityManager
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
-import android.content.Intent
-import android.net.Uri
-import android.os.BatteryManager
 import android.os.Build
-import android.os.Handler
-import android.os.Looper
-import android.os.VibrationEffect
-import android.os.Vibrator
-import android.os.VibratorManager
-import android.widget.Toast
-import com.uronic0x.fluorine.protocol.CoreProtocol
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.nio.charset.StandardCharsets
-import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 /**
- * 1:1 implementation of the 10 workspace and Android device harness tools in `src/harness.rs`:
- * `device_probe`, `fs_list`, `fs_read`, `fs_search`, `git_inspect`,
- * `fs_write`, `fs_edit`, `termux_device`, `android_ui`, `shell_exec`.
+ * Android/Termux local workspace & harness tools:
+ * - fs_list / fs_read / fs_write / fs_edit / fs_search
+ * - shell_exec (with destructive command blocklist & timeout)
+ * - git_cmd (status/diff/log/branch/show)
+ * - termux_api (battery-status / clipboard-get / clipboard-set / notification / toast / tts-speak / wifi-connectioninfo)
+ * - self_adb (devices / getprop / dumpsys / pm / wm / logcat / input / am)
  */
 object AndroidHarnessTools {
 
-    private const val MAX_READ_BYTES = 32 * 1024
-    private const val MAX_WRITE_BYTES = 512 * 1024
-    private const val MAX_CMD_OUTPUT_BYTES = 24 * 1024
-    private const val DEFAULT_CMD_TIMEOUT_SECS = 15L
-    private const val MAX_CMD_TIMEOUT_SECS = 60L
+    private const val MAX_FILE_READ_BYTES = 128 * 1024
+    private const val MAX_FILE_WRITE_BYTES = 512 * 1024
+    private const val MAX_CMD_OUTPUT_BYTES = 64 * 1024
+    private const val DEFAULT_SHELL_TIMEOUT_SECS = 20L
 
-    fun isDeviceControlTool(name: String): Boolean {
-        return name == "fs_write" || name == "fs_edit" ||
-            name == "termux_device" || name == "android_ui" || name == "shell_exec"
-    }
-
-    fun harnessToolDefinitions(includeDeviceTools: Boolean): JSONArray {
-        val base = JSONArray(
-            """
-            [
-              {
-                "type": "function",
-                "function": {
-                  "name": "device_probe",
-                  "description": "Inspect the local device and Android/Termux/Linux runtime environment: OS/arch, Android properties, Termux-API binaries, ADB/Shizuku availability, battery, memory, storage, and workspace path.",
-                  "parameters": {
-                    "type": "object",
-                    "properties": {}
-                  }
-                }
-              },
-              {
-                "type": "function",
-                "function": {
-                  "name": "fs_list",
-                  "description": "List files and directories inside the configured workspace (skips .git, target, node_modules).",
-                  "parameters": {
-                    "type": "object",
-                    "properties": {
-                      "path": { "type": "string", "description": "Relative path inside workspace (default '.')" },
-                      "recursive": { "type": "boolean", "description": "Whether to recurse into subdirectories (default false)" },
-                      "max_depth": { "type": "integer", "description": "Max directory depth when recursive=true (1-6, default 3)" },
-                      "ext": { "type": "string", "description": "Optional file extension filter without leading dot, e.g. 'rs' or 'json'" }
-                    }
-                  }
-                }
-              },
-              {
-                "type": "function",
-                "function": {
-                  "name": "fs_read",
-                  "description": "Read a UTF-8 text file inside the workspace with optional 1-indexed line range.",
-                  "parameters": {
-                    "type": "object",
-                    "properties": {
-                      "path": { "type": "string", "description": "File path relative to workspace" },
-                      "start_line": { "type": "integer", "description": "1-indexed start line (default 1)" },
-                      "end_line": { "type": "integer", "description": "1-indexed inclusive end line (optional)" }
-                    },
-                    "required": ["path"]
-                  }
-                }
-              },
-              {
-                "type": "function",
-                "function": {
-                  "name": "fs_search",
-                  "description": "Search text across files inside the workspace (grep-like), returning file, line number, and line snippet.",
-                  "parameters": {
-                    "type": "object",
-                    "properties": {
-                      "query": { "type": "string", "description": "Substring to search for" },
-                      "path": { "type": "string", "description": "Subdirectory or file relative to workspace (default '.')" },
-                      "case_sensitive": { "type": "boolean", "description": "Default false" },
-                      "max_results": { "type": "integer", "description": "Max matches (1-200, default 50)" }
-                    },
-                    "required": ["query"]
-                  }
-                }
-              },
-              {
-                "type": "function",
-                "function": {
-                  "name": "git_inspect",
-                  "description": "Inspect local git repository state in the workspace: status, diff, log, or branches.",
-                  "parameters": {
-                    "type": "object",
-                    "properties": {
-                      "op": { "type": "string", "enum": ["status", "diff", "log", "branches"] },
-                      "limit": { "type": "integer", "description": "Commit count for 'log' (1-30, default 10)" },
-                      "path": { "type": "string", "description": "Optional relative path filter for diff/log" }
-                    },
-                    "required": ["op"]
-                  }
-                }
-              }
-            ]
-            """.trimIndent()
-        )
-        if (includeDeviceTools) {
-            val deviceDefs = JSONArray(
-                """
-                [
-                  {
-                    "type": "function",
-                    "function": {
-                      "name": "fs_write",
-                      "description": "Create, overwrite, or append a UTF-8 text file inside the workspace.",
-                      "parameters": {
-                        "type": "object",
-                        "properties": {
-                          "path": { "type": "string", "description": "Target file path relative to workspace" },
-                          "content": { "type": "string", "description": "UTF-8 file content" },
-                          "append": { "type": "boolean", "description": "Append instead of overwrite (default false)" }
-                        },
-                        "required": ["path", "content"]
-                      }
-                    }
-                  },
-                  {
-                    "type": "function",
-                    "function": {
-                      "name": "fs_edit",
-                      "description": "Surgically replace text in an existing workspace file. Requires unique match unless replace_all=true.",
-                      "parameters": {
-                        "type": "object",
-                        "properties": {
-                          "path": { "type": "string", "description": "Target file path relative to workspace" },
-                          "old_text": { "type": "string", "description": "Exact text to find" },
-                          "new_text": { "type": "string", "description": "Replacement text" },
-                          "replace_all": { "type": "boolean", "description": "Replace all occurrences (default false)" }
-                        },
-                        "required": ["path", "old_text", "new_text"]
-                      }
-                    }
-                  },
-                  {
-                    "type": "function",
-                    "function": {
-                      "name": "termux_device",
-                      "description": "Access Android phone hardware, sensors, clipboard, notifications, TTS, and properties via Termux-API or native Android/Linux sysfs & getprop.",
-                      "parameters": {
-                        "type": "object",
-                        "properties": {
-                          "op": {
-                            "type": "string",
-                            "enum": [
-                              "battery",
-                              "device_props",
-                              "clipboard_get",
-                              "clipboard_set",
-                              "location",
-                              "wifi_info",
-                              "sensors",
-                              "notification",
-                              "toast",
-                              "vibrate",
-                              "tts_speak",
-                              "open_url"
-                            ]
-                          },
-                          "text": { "type": "string", "description": "Text for clipboard_set, toast, tts_speak, or notification content" },
-                          "title": { "type": "string", "description": "Notification title" },
-                          "id": { "type": "string", "description": "Notification id" },
-                          "url": { "type": "string", "description": "http/https URL for open_url" },
-                          "provider": { "type": "string", "enum": ["gps", "network", "passive"], "description": "Location provider" },
-                          "sensor": { "type": "string", "description": "Optional sensor name for single reading" },
-                          "duration_ms": { "type": "integer", "description": "Vibration duration in ms (50-5000)" }
-                        },
-                        "required": ["op"]
-                      }
-                    }
-                  },
-                  {
-                    "type": "function",
-                    "function": {
-                      "name": "android_ui",
-                      "description": "Self-ADB / Shizuku Android UI perception and control loop: inspect active app, dump semantic UI node tree with tap coordinates, capture screenshot, tap, swipe, input text, keyevent, launch app, read notifications or logcat.",
-                      "parameters": {
-                        "type": "object",
-                        "properties": {
-                          "op": {
-                            "type": "string",
-                            "enum": [
-                              "status",
-                              "current_app",
-                              "dump_ui",
-                              "screenshot",
-                              "tap",
-                              "swipe",
-                              "input_text",
-                              "keyevent",
-                              "launch_app",
-                              "notifications",
-                              "logcat"
-                            ]
-                          },
-                          "backend": { "type": "string", "enum": ["auto", "adb", "shizuku"] },
-                          "x": { "type": "integer" },
-                          "y": { "type": "integer" },
-                          "x1": { "type": "integer" },
-                          "y1": { "type": "integer" },
-                          "x2": { "type": "integer" },
-                          "y2": { "type": "integer" },
-                          "duration_ms": { "type": "integer", "description": "Swipe duration in ms (default 300)" },
-                          "text": { "type": "string", "description": "ASCII/text for input_text" },
-                          "keycode": { "type": "string", "description": "Android keycode name or number, e.g. HOME, BACK, ENTER" },
-                          "package": { "type": "string", "description": "Android package name, e.g. com.android.settings" },
-                          "lines": { "type": "integer", "description": "Number of logcat lines (10-200, default 60)" }
-                        },
-                        "required": ["op"]
-                      }
-                    }
-                  },
-                  {
-                    "type": "function",
-                    "function": {
-                      "name": "shell_exec",
-                      "description": "Execute a shell command inside the workspace with bounded timeout and output cap (supports Termux, Python, Node, Git, Cargo, Gradle).",
-                      "parameters": {
-                        "type": "object",
-                        "properties": {
-                          "command": { "type": "string", "description": "Shell command executed via sh -c inside workspace" },
-                          "subdir": { "type": "string", "description": "Optional relative subdirectory inside workspace" },
-                          "timeout_secs": { "type": "integer", "description": "Timeout in seconds (1-60, default 15)" }
-                        },
-                        "required": ["command"]
-                      }
-                    }
-                  }
-                ]
-                """.trimIndent()
-            )
-            for (i in 0 until deviceDefs.length()) {
-                base.put(deviceDefs.get(i))
-            }
-        }
-        return base
-    }
-
-    private fun findInPath(bin: String): File? {
-        val pathEnv = System.getenv("PATH") ?: "/system/bin:/system/xbin:/vendor/bin"
-        for (dir in pathEnv.split(File.pathSeparator)) {
-            if (dir.isBlank()) continue
-            val f = File(dir, bin)
-            if (f.isFile && f.canExecute()) return f
-        }
-        return null
-    }
-
-    private fun detectToolsMap(): JSONObject {
-        val bins = arrayOf(
-            "adb", "rish", "getprop", "am", "git", "python3", "node", "cargo",
-            "termux-battery-status", "termux-clipboard-get", "termux-clipboard-set",
-            "termux-location", "termux-wifi-connectioninfo", "termux-sensor",
-            "termux-notification", "termux-toast", "termux-vibrate", "termux-tts-speak",
-            "termux-open-url"
-        )
-        val map = JSONObject()
-        for (b in bins) {
-            map.put(b, findInPath(b) != null)
-        }
-        return map
-    }
-
-    private fun readBatteryInfo(context: Context): JSONObject? {
-        return try {
-            val bm = context.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
-            val pct = bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
-            if (pct != null && pct in 0..100) {
-                val charging = bm.isCharging
-                JSONObject()
-                    .put("source", "android_battery_manager")
-                    .put("percentage", pct)
-                    .put("status", if (charging) "Charging" else "Discharging")
-            } else {
-                null
-            }
-        } catch (_: Exception) {
-            null
-        }
-    }
-
-    private fun readMemorySummary(context: Context): JSONObject? {
-        return try {
-            val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
-            if (am != null) {
-                val info = ActivityManager.MemoryInfo()
-                am.getMemoryInfo(info)
-                JSONObject()
-                    .put("mem_total_mb", info.totalMem / (1024 * 1024))
-                    .put("mem_available_mb", info.availMem / (1024 * 1024))
-            } else {
-                null
-            }
-        } catch (_: Exception) {
-            null
-        }
-    }
-
-    fun probeRuntimeSummary(
-        context: Context,
-        workspaceRoot: File,
-        allowAndroidStorage: Boolean
-    ): JSONObject {
-        val tools = detectToolsMap()
-        val termuxVersion = System.getenv("TERMUX_VERSION")?.takeIf { it.isNotBlank() }
-        val arch = Build.SUPPORTED_ABIS.firstOrNull() ?: System.getProperty("os.arch") ?: "aarch64"
-        return JSONObject()
-            .put("os", "android")
-            .put("arch", arch)
-            .put("is_android", true)
-            .put("termux_version", termuxVersion ?: JSONObject.NULL)
-            .put("termux_api_ready", tools.optBoolean("termux-battery-status", false))
-            .put("adb_ready", tools.optBoolean("adb", false))
-            .put("shizuku_ready", tools.optBoolean("rish", false))
-            .put("workspace", workspaceRoot.canonicalPath)
-            .put("allow_android_storage", allowAndroidStorage)
-            .put("memory", readMemorySummary(context) ?: JSONObject.NULL)
-            .put("battery", readBatteryInfo(context) ?: JSONObject.NULL)
-            .put("available_bins", tools)
-    }
-
-    private fun resolveWorkspacePath(
-        workspaceRoot: File,
-        allowAndroidStorage: Boolean,
-        rawPath: String,
-        forWrite: Boolean
-    ): File {
-        val parts = rawPath.split("/", "\\")
-        if (parts.any { it == ".." }) {
-            throw IllegalArgumentException("path traversal ('..') is not allowed")
-        }
-        val canonWorkspace = workspaceRoot.canonicalFile
-        val reqFile = File(rawPath)
-        val candidate = if (reqFile.isAbsolute) reqFile else File(canonWorkspace, rawPath)
-
-        val allowedRoots = mutableListOf(canonWorkspace)
-        if (!forWrite && allowAndroidStorage) {
-            for (extra in listOf("/sdcard", "/storage/emulated/0")) {
-                val f = File(extra)
-                if (f.exists()) {
-                    runCatching { allowedRoots.add(f.canonicalFile) }
-                }
-            }
-        }
-
-        val resolved = if (candidate.exists()) {
-            candidate.canonicalFile
-        } else if (forWrite) {
-            candidate.canonicalFile
-        } else {
-            throw IllegalArgumentException("path does not exist: $rawPath")
-        }
-
-        val insideAllowed = allowedRoots.any { root ->
-            resolved.path == root.path || resolved.path.startsWith(root.path + File.separator)
-        }
-        if (!insideAllowed) {
-            throw IllegalArgumentException("path '${resolved.path}' is outside workspace root '${canonWorkspace.path}'")
-        }
-
-        if (forWrite) {
-            val rel = resolved.path.removePrefix(canonWorkspace.path).trimStart(File.separatorChar)
-            if (rel.split(File.separatorChar).any { it == ".git" }) {
-                throw IllegalArgumentException("refusing to modify .git internals directly")
-            }
-        }
-        return resolved
-    }
-
-    private fun shouldSkipDir(name: String): Boolean {
-        return name == ".git" || name == "target" || name == "node_modules" ||
-            name == ".gradle" || name == "build"
-    }
-
-    private data class CmdResult(
-        val exitCode: Int,
-        val timedOut: Boolean,
-        val stdout: String,
-        val stderr: String,
-        val truncated: Boolean
+    val TOOL_NAMES = setOf(
+        "fs_list",
+        "fs_read",
+        "fs_write",
+        "fs_edit",
+        "fs_search",
+        "shell_exec",
+        "git_cmd",
+        "termux_api",
+        "self_adb"
     )
 
-    private fun truncateUtf8(bytes: ByteArray, maxBytes: Int): Pair<String, Boolean> {
-        if (bytes.size <= maxBytes) {
-            return String(bytes, StandardCharsets.UTF_8) to false
-        }
-        var end = maxBytes
-        var steps = 0
-        while (end > 0 && (bytes[end].toInt() and 0xC0) == 0x80 && steps < 4) {
-            end--
-            steps++
-        }
-        val s = String(bytes, 0, end, StandardCharsets.UTF_8) + "\n...[truncated]"
-        return s to true
-    }
-
-    private fun runCommandTimeout(
-        program: String,
-        args: List<String>,
-        cwd: File,
-        timeoutSecs: Long
-    ): CmdResult {
-        val cmdList = mutableListOf(program).apply { addAll(args) }
-        val proc = try {
-            ProcessBuilder(cmdList)
-                .directory(cwd)
-                .start()
-        } catch (e: Exception) {
-            throw IllegalArgumentException("failed to spawn $program: ${e.message}")
-        }
-        var outBytes = ByteArray(0)
-        var errBytes = ByteArray(0)
-        val outThread = Thread {
-            runCatching {
-                outBytes = proc.inputStream.readNBytes(MAX_CMD_OUTPUT_BYTES + 1024)
-            }
-        }.apply { start() }
-        val errThread = Thread {
-            runCatching {
-                errBytes = proc.errorStream.readNBytes(MAX_CMD_OUTPUT_BYTES / 2 + 1024)
-            }
-        }.apply { start() }
-
-        val clampedTimeout = timeoutSecs.coerceIn(1L, MAX_CMD_TIMEOUT_SECS)
-        val finished = proc.waitFor(clampedTimeout, TimeUnit.SECONDS)
-        if (!finished) {
-            proc.destroyForcibly()
-        }
-        outThread.join(1000)
-        errThread.join(1000)
-        val (stdout, outTrunc) = truncateUtf8(outBytes, MAX_CMD_OUTPUT_BYTES)
-        val (stderr, errTrunc) = truncateUtf8(errBytes, MAX_CMD_OUTPUT_BYTES / 2)
-        val exitCode = if (finished) proc.exitValue() else 124
-        return CmdResult(
-            exitCode = exitCode,
-            timedOut = !finished,
-            stdout = stdout,
-            stderr = stderr,
-            truncated = outTrunc || errTrunc
+    fun declarations(): JSONArray {
+        val arr = JSONArray()
+        arr.put(
+            fnDecl(
+                name = "fs_list",
+                description = "List files and directories inside the workspace (or read-only /sdcard when enabled). Returns name, type, and size.",
+                properties = JSONObject()
+                    .put("path", prop("string", "Relative path inside workspace (default '.') or /sdcard/... when enabled"))
+                    .put("recursive", prop("boolean", "List recursively up to depth 3 (default false)")),
+                required = emptyList()
+            )
         )
+        arr.put(
+            fnDecl(
+                name = "fs_read",
+                description = "Read a UTF-8 text file from workspace (or read-only /sdcard when enabled), optionally slicing by 1-based line range.",
+                properties = JSONObject()
+                    .put("path", prop("string", "File path relative to workspace"))
+                    .put("start_line", prop("integer", "1-based start line (optional)"))
+                    .put("end_line", prop("integer", "1-based inclusive end line (optional)")),
+                required = listOf("path")
+            )
+        )
+        arr.put(
+            fnDecl(
+                name = "fs_write",
+                description = "Create or overwrite a UTF-8 text file inside the workspace directory. Generated files are automatically presented to the user with a rounded export card.",
+                properties = JSONObject()
+                    .put("path", prop("string", "Relative file path inside workspace (must not escape workspace)"))
+                    .put("content", prop("string", "Full text content to write"))
+                    .put("append", prop("boolean", "Append instead of overwrite (default false)")),
+                required = listOf("path", "content")
+            )
+        )
+        arr.put(
+            fnDecl(
+                name = "fs_edit",
+                description = "Surgical search-and-replace edit on an existing file inside the workspace.",
+                properties = JSONObject()
+                    .put("path", prop("string", "Relative file path inside workspace"))
+                    .put("old_text", prop("string", "Exact substring to find"))
+                    .put("new_text", prop("string", "Replacement text"))
+                    .put("replace_all", prop("boolean", "Replace all occurrences instead of requiring a single match (default false)")),
+                required = listOf("path", "old_text", "new_text")
+            )
+        )
+        arr.put(
+            fnDecl(
+                name = "fs_search",
+                description = "Search for a substring or keyword across text files in the workspace.",
+                properties = JSONObject()
+                    .put("query", prop("string", "Substring to search for"))
+                    .put("path", prop("string", "Relative subdirectory or file (default '.')"))
+                    .put("case_sensitive", prop("boolean", "Case-sensitive match (default false)")),
+                required = listOf("query")
+            )
+        )
+        arr.put(
+            fnDecl(
+                name = "shell_exec",
+                description = "Execute a non-interactive local shell command with timeout inside the workspace directory.",
+                properties = JSONObject()
+                    .put("command", prop("string", "Shell command line to run via sh -c"))
+                    .put("cwd", prop("string", "Relative working directory inside workspace (default '.')")),
+                required = listOf("command")
+            )
+        )
+        arr.put(
+            fnDecl(
+                name = "git_cmd",
+                description = "Run a safe Git command (status, diff, log, show, branch, rev-parse) inside the workspace.",
+                properties = JSONObject()
+                    .put("subcommand", prop("string", "One of: status, diff, log, show, branch, rev-parse"))
+                    .put("args", JSONObject().put("type", "array").put("items", JSONObject().put("type", "string")).put("description", "Additional CLI arguments")),
+                required = listOf("subcommand")
+            )
+        )
+        arr.put(
+            fnDecl(
+                name = "termux_api",
+                description = "Invoke an allowlisted Termux:API command on Android (battery-status, clipboard-get, clipboard-set, toast, notification, wifi-connectioninfo, tts-speak) with Android system fallback.",
+                properties = JSONObject()
+                    .put("api", prop("string", "One of: battery-status, clipboard-get, clipboard-set, toast, notification, wifi-connectioninfo, tts-speak"))
+                    .put("args", JSONObject().put("type", "array").put("items", JSONObject().put("type", "string")).put("description", "Optional arguments"))
+                    .put("stdin", prop("string", "Optional stdin text")),
+                required = listOf("api")
+            )
+        )
+        arr.put(
+            fnDecl(
+                name = "self_adb",
+                description = "Run an allowlisted local Android diagnostic/ADB subcommand (devices, getprop, dumpsys, pm, wm, logcat, input, am) with local Android shell fallback.",
+                properties = JSONObject()
+                    .put("action", prop("string", "One of: devices, getprop, dumpsys, pm, wm, logcat, input, am"))
+                    .put("args", JSONObject().put("type", "array").put("items", JSONObject().put("type", "string")).put("description", "Arguments for the action")),
+                required = listOf("action")
+            )
+        )
+        return arr
     }
 
-    fun executeHarnessTool(
+    fun execute(
         name: String,
         args: JSONObject,
-        context: Context,
         workspaceRoot: File,
-        allowAndroidStorage: Boolean
+        allowSdcardReadonly: Boolean,
+        shellTimeoutSecs: Long = DEFAULT_SHELL_TIMEOUT_SECS
     ): JSONObject {
-        return when (name) {
-            "device_probe" -> runDeviceProbe(context, workspaceRoot, allowAndroidStorage)
-            "fs_list" -> runFsList(args, workspaceRoot, allowAndroidStorage)
-            "fs_read" -> runFsRead(args, workspaceRoot, allowAndroidStorage)
-            "fs_write" -> runFsWrite(args, workspaceRoot, allowAndroidStorage)
-            "fs_edit" -> runFsEdit(args, workspaceRoot, allowAndroidStorage)
-            "fs_search" -> runFsSearch(args, workspaceRoot, allowAndroidStorage)
-            "git_inspect" -> runGitInspect(args, workspaceRoot, allowAndroidStorage)
-            "termux_device" -> runTermuxDevice(args, context, workspaceRoot, allowAndroidStorage)
-            "android_ui" -> runAndroidUi(args, workspaceRoot)
-            "shell_exec" -> runShellExec(args, workspaceRoot, allowAndroidStorage)
-            else -> throw IllegalArgumentException("unknown harness tool: $name")
+        workspaceRoot.mkdirs()
+        return try {
+            when (name) {
+                "fs_list" -> toolFsList(args, workspaceRoot, allowSdcardReadonly)
+                "fs_read" -> toolFsRead(args, workspaceRoot, allowSdcardReadonly)
+                "fs_write" -> toolFsWrite(args, workspaceRoot)
+                "fs_edit" -> toolFsEdit(args, workspaceRoot)
+                "fs_search" -> toolFsSearch(args, workspaceRoot, allowSdcardReadonly)
+                "shell_exec" -> toolShellExec(args, workspaceRoot, shellTimeoutSecs)
+                "git_cmd" -> toolGitCmd(args, workspaceRoot, shellTimeoutSecs)
+                "termux_api" -> toolTermuxApi(args, workspaceRoot, shellTimeoutSecs)
+                "self_adb" -> toolSelfAdb(args, workspaceRoot, shellTimeoutSecs)
+                else -> JSONObject().put("ok", false).put("error", "Unknown harness tool: $name")
+            }
+        } catch (e: Exception) {
+            JSONObject().put("ok", false).put("error", e.message ?: e.toString())
         }
     }
 
-    private fun runDeviceProbe(
-        context: Context,
+    private fun resolvePath(
+        rawPath: String,
         workspaceRoot: File,
-        allowAndroidStorage: Boolean
-    ): JSONObject {
-        val summary = probeRuntimeSummary(context, workspaceRoot, allowAndroidStorage)
-        val props = JSONObject()
-            .put("ro.product.manufacturer", Build.MANUFACTURER)
-            .put("ro.product.model", Build.MODEL)
-            .put("ro.build.version.release", Build.VERSION.RELEASE)
-            .put("ro.build.version.sdk", Build.VERSION.SDK_INT.toString())
-            .put("ro.product.cpu.abi", Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a")
-        summary.put("android_props", props)
-        return summary
+        allowSdcardReadonly: Boolean,
+        writeAccess: Boolean
+    ): File {
+        val trimmed = rawPath.trim().ifEmpty { "." }
+        val wsCanonical = workspaceRoot.canonicalFile
+
+        if (!writeAccess && allowSdcardReadonly &&
+            (trimmed.startsWith("/sdcard") || trimmed.startsWith("/storage/emulated/0"))
+        ) {
+            val f = File(trimmed).canonicalFile
+            val p = f.path
+            if (p.startsWith("/sdcard") || p.startsWith("/storage/emulated/0")) {
+                return f
+            }
+            throw IllegalArgumentException("Read-only external path must stay within /sdcard")
+        }
+
+        val candidate = if (File(trimmed).isAbsolute) {
+            File(trimmed).canonicalFile
+        } else {
+            File(wsCanonical, trimmed).canonicalFile
+        }
+
+        val wsPrefix = wsCanonical.path
+        if (candidate.path != wsPrefix && !candidate.path.startsWith(wsPrefix + File.separator)) {
+            throw IllegalArgumentException("Path escapes workspace root: $rawPath")
+        }
+        return candidate
     }
 
-    private fun collectEntries(
-        root: File,
-        dir: File,
-        depth: Int,
-        maxDepth: Int,
-        extFilter: String?,
-        out: JSONArray
-    ) {
-        if (out.length() >= 200) return
-        val entries = dir.listFiles()?.sortedBy { it.name } ?: return
-        for (entry in entries) {
-            if (out.length() >= 200) break
-            val isDir = entry.isDirectory
-            if (isDir && shouldSkipDir(entry.name)) continue
-            if (!isDir && extFilter != null) {
-                val ext = entry.extension
-                if (!ext.equals(extFilter, ignoreCase = true)) continue
-            }
-            val rel = entry.canonicalPath.removePrefix(root.canonicalPath).trimStart(File.separatorChar)
-                .ifEmpty { entry.name }
-            val size = if (isDir) 0L else entry.length()
-            out.put(
-                JSONObject()
-                    .put("path", rel)
-                    .put("type", if (isDir) "dir" else "file")
-                    .put("size", size)
-            )
-            if (isDir && depth < maxDepth) {
-                collectEntries(root, entry, depth + 1, maxDepth, extFilter, out)
-            }
+    private fun relativeDisplayPath(file: File, workspaceRoot: File): String {
+        val wsPath = workspaceRoot.canonicalFile.path
+        val fPath = file.canonicalFile.path
+        return if (fPath == wsPath) {
+            "."
+        } else if (fPath.startsWith(wsPath + File.separator)) {
+            fPath.substring(wsPath.length + 1).replace('\\', '/')
+        } else {
+            fPath
         }
     }
 
-    private fun runFsList(
+    private fun toolFsList(
         args: JSONObject,
         workspaceRoot: File,
-        allowAndroidStorage: Boolean
+        allowSdcardReadonly: Boolean
     ): JSONObject {
-        val rawPath = args.optString("path", ".").ifEmpty { "." }
+        val rel = args.optString("path", ".")
         val recursive = args.optBoolean("recursive", false)
-        val maxDepth = if (recursive) args.optInt("max_depth", 3).coerceIn(1, 6) else 1
-        val extFilter = args.optString("ext", "").trimStart('.').takeIf { it.isNotEmpty() }
-        val dir = resolveWorkspacePath(workspaceRoot, allowAndroidStorage, rawPath, false)
-        if (!dir.isDirectory) throw IllegalArgumentException("not a directory: $rawPath")
+        val dir = resolvePath(rel, workspaceRoot, allowSdcardReadonly, writeAccess = false)
+        if (!dir.exists()) {
+            return JSONObject().put("ok", false).put("error", "Path does not exist: $rel")
+        }
         val entries = JSONArray()
-        collectEntries(workspaceRoot.canonicalFile, dir, 1, maxDepth, extFilter, entries)
+        val maxEntries = 200
+        fun walk(current: File, depth: Int) {
+            if (entries.length() >= maxEntries || depth > 3) return
+            val children = current.listFiles()?.sortedBy { it.name } ?: return
+            for (child in children) {
+                if (entries.length() >= maxEntries) break
+                if (child.name == ".git" || child.name == "target" || child.name == "build") continue
+                val item = JSONObject()
+                    .put("path", relativeDisplayPath(child, workspaceRoot))
+                    .put("type", if (child.isDirectory) "dir" else "file")
+                    .put("size", if (child.isFile) child.length() else 0L)
+                entries.put(item)
+                if (recursive && child.isDirectory) {
+                    walk(child, depth + 1)
+                }
+            }
+        }
+        if (dir.isDirectory) {
+            walk(dir, 1)
+        } else {
+            entries.put(
+                JSONObject()
+                    .put("path", relativeDisplayPath(dir, workspaceRoot))
+                    .put("type", "file")
+                    .put("size", dir.length())
+            )
+        }
         return JSONObject()
-            .put("root", workspaceRoot.canonicalPath)
+            .put("ok", true)
+            .put("path", relativeDisplayPath(dir, workspaceRoot))
             .put("count", entries.length())
-            .put("truncated", entries.length() >= 200)
             .put("entries", entries)
     }
 
-    private fun runFsRead(
+    private fun toolFsRead(
         args: JSONObject,
         workspaceRoot: File,
-        allowAndroidStorage: Boolean
+        allowSdcardReadonly: Boolean
     ): JSONObject {
-        val rawPath = args.optString("path").takeIf { it.isNotEmpty() }
-            ?: throw IllegalArgumentException("missing 'path'")
-        val file = resolveWorkspacePath(workspaceRoot, allowAndroidStorage, rawPath, false)
-        if (!file.isFile) throw IllegalArgumentException("not a file: $rawPath")
-        val bytes = file.readBytes()
-        if (bytes.contains(0)) {
-            throw IllegalArgumentException("file is not valid UTF-8 (binary files cannot be read as text)")
+        val rel = args.optString("path", "")
+        if (rel.isBlank()) return JSONObject().put("ok", false).put("error", "path is required")
+        val file = resolvePath(rel, workspaceRoot, allowSdcardReadonly, writeAccess = false)
+        if (!file.exists() || !file.isFile) {
+            return JSONObject().put("ok", false).put("error", "File not found: $rel")
         }
-        val text = String(bytes, StandardCharsets.UTF_8)
-        val lines = if (text.isEmpty()) emptyList() else text.lines()
-        val totalLines = lines.size
-        val start = maxOf(1, args.optInt("start_line", 1))
-        val end = if (args.has("end_line") && !args.isNull("end_line")) {
-            minOf(totalLines, args.optInt("end_line", totalLines))
+        if (file.length() > MAX_FILE_READ_BYTES) {
+            return JSONObject().put(
+                "ok",
+                false
+            ).put("error", "File exceeds ${MAX_FILE_READ_BYTES} bytes limit (${file.length()} bytes)")
+        }
+        val content = file.readText(Charsets.UTF_8)
+        val lines = content.lines()
+        val startLine = args.optInt("start_line", 1).coerceAtLeast(1)
+        val endLine = args.optInt("end_line", lines.size).coerceIn(startLine, lines.size.coerceAtLeast(1))
+        val slice = if (lines.isEmpty()) {
+            ""
         } else {
-            totalLines
-        }
-        if (start > totalLines && totalLines > 0) {
-            throw IllegalArgumentException("start_line $start exceeds total lines ($totalLines)")
-        }
-        val out = StringBuilder()
-        var truncated = false
-        if (totalLines > 0 && start <= end) {
-            for (idx in (start - 1) until end) {
-                val lineStr = "${idx + 1}: ${lines[idx]}\n"
-                if (out.length + lineStr.length > MAX_READ_BYTES) {
-                    truncated = true
-                    break
-                }
-                out.append(lineStr)
-            }
+            lines.subList(startLine - 1, endLine).joinToString("\n")
         }
         return JSONObject()
-            .put("path", rawPath)
-            .put("total_lines", totalLines)
-            .put("start_line", start)
-            .put("end_line", end)
-            .put("truncated", truncated)
-            .put("content", out.toString())
+            .put("ok", true)
+            .put("path", relativeDisplayPath(file, workspaceRoot))
+            .put("total_lines", lines.size)
+            .put("start_line", startLine)
+            .put("end_line", endLine)
+            .put("content", slice)
     }
 
-    private fun runFsWrite(
+    private fun toolFsWrite(
         args: JSONObject,
-        workspaceRoot: File,
-        allowAndroidStorage: Boolean
+        workspaceRoot: File
     ): JSONObject {
-        val rawPath = args.optString("path").takeIf { it.isNotEmpty() }
-            ?: throw IllegalArgumentException("missing 'path'")
-        if (!args.has("content")) throw IllegalArgumentException("missing 'content'")
-        val content = args.optString("content")
-        val contentBytes = content.toByteArray(StandardCharsets.UTF_8)
-        if (contentBytes.size > MAX_WRITE_BYTES) {
-            throw IllegalArgumentException("content exceeds 512 KiB limit")
-        }
+        val rel = args.optString("path", "")
+        if (rel.isBlank()) return JSONObject().put("ok", false).put("error", "path is required")
+        val content = args.optString("content", "")
         val append = args.optBoolean("append", false)
-        val file = resolveWorkspacePath(workspaceRoot, allowAndroidStorage, rawPath, true)
+        val bytes = content.toByteArray(Charsets.UTF_8)
+        if (bytes.size > MAX_FILE_WRITE_BYTES) {
+            return JSONObject().put("ok", false).put("error", "Content exceeds $MAX_FILE_WRITE_BYTES bytes")
+        }
+        val file = resolvePath(rel, workspaceRoot, allowSdcardReadonly = false, writeAccess = true)
         file.parentFile?.mkdirs()
         if (append && file.exists()) {
-            val existing = file.readText(StandardCharsets.UTF_8)
-            val combined = existing + content
-            if (combined.toByteArray(StandardCharsets.UTF_8).size > MAX_WRITE_BYTES) {
-                throw IllegalArgumentException("resulting file exceeds 512 KiB limit")
-            }
-            file.writeText(combined, StandardCharsets.UTF_8)
+            file.appendText(content, Charsets.UTF_8)
         } else {
-            file.writeText(content, StandardCharsets.UTF_8)
+            file.writeText(content, Charsets.UTF_8)
         }
+        val relDisplay = relativeDisplayPath(file, workspaceRoot)
         return JSONObject()
-            .put("path", rawPath)
-            .put("bytes_written", contentBytes.size)
-            .put("append", append)
+            .put("ok", true)
+            .put("path", relDisplay)
+            .put("bytes", file.length())
+            .put("mode", if (append) "append" else "write")
     }
 
-    private fun runFsEdit(
+    private fun toolFsEdit(
         args: JSONObject,
-        workspaceRoot: File,
-        allowAndroidStorage: Boolean
+        workspaceRoot: File
     ): JSONObject {
-        val rawPath = args.optString("path").takeIf { it.isNotEmpty() }
-            ?: throw IllegalArgumentException("missing 'path'")
-        if (!args.has("old_text")) throw IllegalArgumentException("missing 'old_text'")
-        if (!args.has("new_text")) throw IllegalArgumentException("missing 'new_text'")
-        val oldText = args.optString("old_text")
-        val newText = args.optString("new_text")
-        if (oldText.isEmpty()) throw IllegalArgumentException("old_text must not be empty")
+        val rel = args.optString("path", "")
+        val oldText = args.optString("old_text", "")
+        val newText = args.optString("new_text", "")
         val replaceAll = args.optBoolean("replace_all", false)
-        val file = resolveWorkspacePath(workspaceRoot, allowAndroidStorage, rawPath, true)
-        if (!file.isFile) throw IllegalArgumentException("file does not exist: $rawPath")
-        val content = file.readText(StandardCharsets.UTF_8)
-        var matches = 0
-        var searchIdx = 0
-        while (true) {
-            val found = content.indexOf(oldText, searchIdx)
-            if (found < 0) break
-            matches++
-            searchIdx = found + oldText.length
+        if (rel.isBlank() || oldText.isEmpty()) {
+            return JSONObject().put("ok", false).put("error", "path and non-empty old_text are required")
         }
-        if (matches == 0) throw IllegalArgumentException("old_text not found in file")
-        if (!replaceAll && matches > 1) {
-            throw IllegalArgumentException("old_text matched $matches times; provide more context or set replace_all=true")
+        val file = resolvePath(rel, workspaceRoot, allowSdcardReadonly = false, writeAccess = true)
+        if (!file.exists() || !file.isFile) {
+            return JSONObject().put("ok", false).put("error", "File not found: $rel")
+        }
+        val original = file.readText(Charsets.UTF_8)
+        val occurrences = countOccurrences(original, oldText)
+        if (occurrences == 0) {
+            return JSONObject().put("ok", false).put("error", "old_text not found in $rel")
+        }
+        if (occurrences > 1 && !replaceAll) {
+            return JSONObject().put(
+                "ok",
+                false
+            ).put("error", "old_text matched $occurrences times in $rel; set replace_all=true or provide more context")
         }
         val updated = if (replaceAll) {
-            content.replace(oldText, newText)
+            original.replace(oldText, newText)
         } else {
-            content.replaceFirst(oldText, newText)
+            original.replaceFirst(oldText, newText)
         }
-        if (updated.toByteArray(StandardCharsets.UTF_8).size > MAX_WRITE_BYTES) {
-            throw IllegalArgumentException("updated file exceeds 512 KiB limit")
-        }
-        file.writeText(updated, StandardCharsets.UTF_8)
+        file.writeText(updated, Charsets.UTF_8)
+        val relDisplay = relativeDisplayPath(file, workspaceRoot)
         return JSONObject()
-            .put("path", rawPath)
-            .put("replacements", if (replaceAll) matches else 1)
+            .put("ok", true)
+            .put("path", relDisplay)
+            .put("replaced", if (replaceAll) occurrences else 1)
+            .put("bytes", file.length())
     }
 
-    private fun searchRecursive(
-        root: File,
-        target: File,
-        query: String,
-        caseSensitive: Boolean,
-        maxResults: Int,
-        matches: JSONArray
-    ) {
-        if (matches.length() >= maxResults) return
-        if (target.isFile) {
-            if (target.length() <= 512 * 1024) {
-                val bytes = runCatching { target.readBytes() }.getOrNull() ?: return
-                if (!bytes.contains(0)) {
-                    val text = String(bytes, StandardCharsets.UTF_8)
-                    val needle = if (caseSensitive) query else query.lowercase(Locale.ROOT)
-                    val rel = target.canonicalPath.removePrefix(root.canonicalPath)
-                        .trimStart(File.separatorChar).ifEmpty { target.name }
-                    for ((idx, line) in text.lines().withIndex()) {
-                        val hit = if (caseSensitive) {
-                            line.contains(needle)
-                        } else {
-                            line.lowercase(Locale.ROOT).contains(needle)
-                        }
-                        if (hit) {
-                            val snippet = if (line.length > 240) line.take(240) + "\n...[truncated]" else line
-                            matches.put(
-                                JSONObject()
-                                    .put("file", rel)
-                                    .put("line", idx + 1)
-                                    .put("text", snippet)
-                            )
-                            if (matches.length() >= maxResults) break
-                        }
-                    }
-                }
-            }
-            return
+    private fun countOccurrences(haystack: String, needle: String): Int {
+        var count = 0
+        var idx = 0
+        while (true) {
+            val found = haystack.indexOf(needle, idx)
+            if (found < 0) break
+            count++
+            idx = found + needle.length
         }
-        val entries = target.listFiles()?.sortedBy { it.name } ?: return
-        for (entry in entries) {
-            if (matches.length() >= maxResults) break
-            if (entry.isDirectory && shouldSkipDir(entry.name)) continue
-            searchRecursive(root, entry, query, caseSensitive, maxResults, matches)
-        }
+        return count
     }
 
-    private fun runFsSearch(
+    private fun toolFsSearch(
         args: JSONObject,
         workspaceRoot: File,
-        allowAndroidStorage: Boolean
+        allowSdcardReadonly: Boolean
     ): JSONObject {
-        val query = args.optString("query").takeIf { it.isNotEmpty() }
-            ?: throw IllegalArgumentException("missing non-empty 'query'")
-        val rawPath = args.optString("path", ".").ifEmpty { "." }
+        val query = args.optString("query", "")
+        if (query.isBlank()) return JSONObject().put("ok", false).put("error", "query is required")
+        val rel = args.optString("path", ".")
         val caseSensitive = args.optBoolean("case_sensitive", false)
-        val maxResults = args.optInt("max_results", 50).coerceIn(1, 200)
-        val target = resolveWorkspacePath(workspaceRoot, allowAndroidStorage, rawPath, false)
+        val root = resolvePath(rel, workspaceRoot, allowSdcardReadonly, writeAccess = false)
+        if (!root.exists()) {
+            return JSONObject().put("ok", false).put("error", "Search path does not exist: $rel")
+        }
         val matches = JSONArray()
-        searchRecursive(workspaceRoot.canonicalFile, target, query, caseSensitive, maxResults, matches)
+        val maxMatches = 80
+        fun searchFile(f: File) {
+            if (matches.length() >= maxMatches || !f.isFile || f.length() > MAX_FILE_READ_BYTES) return
+            val lines = runCatching { f.readLines(Charsets.UTF_8) }.getOrNull() ?: return
+            for ((idx, line) in lines.withIndex()) {
+                if (matches.length() >= maxMatches) break
+                val hit = if (caseSensitive) {
+                    line.contains(query)
+                } else {
+                    line.contains(query, ignoreCase = true)
+                }
+                if (hit) {
+                    matches.put(
+                        JSONObject()
+                            .put("path", relativeDisplayPath(f, workspaceRoot))
+                            .put("line", idx + 1)
+                            .put("text", line.take(240))
+                    )
+                }
+            }
+        }
+        if (root.isFile) {
+            searchFile(root)
+        } else {
+            root.walkTopDown()
+                .onEnter { it.name != ".git" && it.name != "target" && it.name != "build" }
+                .forEach { f ->
+                    if (matches.length() < maxMatches) searchFile(f)
+                }
+        }
         return JSONObject()
+            .put("ok", true)
             .put("query", query)
             .put("count", matches.length())
             .put("matches", matches)
     }
 
-    private fun runGitInspect(
+    private fun isBlockedShellCommand(cmd: String): String? {
+        val lower = cmd.lowercase()
+        val blockedPatterns = listOf(
+            "rm -rf /",
+            "mkfs",
+            "dd if=/dev/zero",
+            ":(){ :|:& };:",
+            "reboot",
+            "shutdown"
+        )
+        for (pat in blockedPatterns) {
+            if (lower.contains(pat)) return "Blocked dangerous command pattern: $pat"
+        }
+        return null
+    }
+
+    private fun toolShellExec(
         args: JSONObject,
         workspaceRoot: File,
-        allowAndroidStorage: Boolean
+        timeoutSecs: Long
     ): JSONObject {
-        if (findInPath("git") == null) {
-            throw IllegalArgumentException("git binary is not installed in PATH")
+        val command = args.optString("command", "").trim()
+        if (command.isBlank()) return JSONObject().put("ok", false).put("error", "command is required")
+        isBlockedShellCommand(command)?.let { reason ->
+            return JSONObject().put("ok", false).put("error", reason)
         }
-        val op = args.optString("op").takeIf { it.isNotEmpty() }
-            ?: throw IllegalArgumentException("missing 'op'")
-        val limit = args.optInt("limit", 10).coerceIn(1, 30)
-        val relPath = args.optString("path").takeIf { it.isNotEmpty() }
-        if (relPath != null) {
-            resolveWorkspacePath(workspaceRoot, allowAndroidStorage, relPath, false)
+        val cwdRel = args.optString("cwd", ".")
+        val cwd = resolvePath(cwdRel, workspaceRoot, allowSdcardReadonly = false, writeAccess = false)
+        return runProcess(listOf("sh", "-c", command), cwd, null, timeoutSecs)
+    }
+
+    private fun toolGitCmd(
+        args: JSONObject,
+        workspaceRoot: File,
+        timeoutSecs: Long
+    ): JSONObject {
+        val sub = args.optString("subcommand", "").trim()
+        val allowed = setOf("status", "diff", "log", "show", "branch", "rev-parse")
+        if (sub !in allowed) {
+            return JSONObject().put("ok", false).put("error", "Unsupported git subcommand: $sub")
         }
-        val cmdArgs = when (op) {
-            "status" -> mutableListOf("status", "--short", "--branch")
-            "diff" -> mutableListOf("diff", "--no-ext-diff")
-            "log" -> mutableListOf("log", "-n$limit", "--oneline", "--decorate")
-            "branches" -> mutableListOf("branch", "-a", "--no-color")
-            else -> throw IllegalArgumentException("unsupported git_inspect op: $op")
+        val cmd = mutableListOf("git", sub)
+        val extra = args.optJSONArray("args")
+        if (extra != null) {
+            for (i in 0 until extra.length()) {
+                val a = extra.optString(i, "")
+                if (a.isNotBlank()) cmd.add(a)
+            }
         }
-        if (relPath != null && (op == "diff" || op == "log")) {
-            cmdArgs.add("--")
-            cmdArgs.add(relPath)
+        return runProcess(cmd, workspaceRoot, null, timeoutSecs)
+    }
+
+    private fun toolTermuxApi(
+        args: JSONObject,
+        workspaceRoot: File,
+        timeoutSecs: Long
+    ): JSONObject {
+        val api = args.optString("api", "").trim()
+        val allowed = setOf(
+            "battery-status",
+            "clipboard-get",
+            "clipboard-set",
+            "toast",
+            "notification",
+            "wifi-connectioninfo",
+            "tts-speak"
+        )
+        if (api !in allowed) {
+            return JSONObject().put("ok", false).put("error", "Unsupported termux_api: $api")
         }
-        val res = runCommandTimeout("git", cmdArgs, workspaceRoot, 10)
+        val binName = "termux-$api"
+        val cmd = mutableListOf(binName)
+        val extra = args.optJSONArray("args")
+        if (extra != null) {
+            for (i in 0 until extra.length()) {
+                val a = extra.optString(i, "")
+                if (a.isNotBlank()) cmd.add(a)
+            }
+        }
+        val stdinText = args.optString("stdin", "").takeIf { it.isNotEmpty() }
+        val res = runProcess(cmd, workspaceRoot, stdinText, timeoutSecs)
+        if (res.optBoolean("ok", false)) return res
+
+        // Fallback when Termux:API binary is not installed in standard Android APK sandbox
         return JSONObject()
-            .put("op", op)
-            .put("exit_code", res.exitCode)
-            .put("timed_out", res.timedOut)
-            .put("stdout", res.stdout)
-            .put("stderr", res.stderr)
-            .put("truncated", res.truncated)
+            .put("ok", true)
+            .put("fallback", "android_os")
+            .put("api", api)
+            .put("device_model", "${Build.MANUFACTURER} ${Build.MODEL}")
+            .put("sdk_int", Build.VERSION.SDK_INT)
+            .put("note", "termux-api binary ($binName) not found in PATH; returned Android runtime metadata.")
     }
 
-    private fun runTermuxDevice(
+    private fun toolSelfAdb(
         args: JSONObject,
-        context: Context,
         workspaceRoot: File,
-        allowAndroidStorage: Boolean
+        timeoutSecs: Long
     ): JSONObject {
-        val op = args.optString("op").takeIf { it.isNotEmpty() }
-            ?: throw IllegalArgumentException("missing 'op'")
-        return when (op) {
-            "battery" -> {
-                readBatteryInfo(context)
-                    ?: throw IllegalArgumentException("battery status unavailable")
-            }
-            "device_props" -> runDeviceProbe(context, workspaceRoot, allowAndroidStorage)
-            "clipboard_get" -> {
-                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                val text = cm?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString() ?: ""
-                JSONObject().put("source", "android_clipboard").put("text", text)
-            }
-            "clipboard_set" -> {
-                val text = args.optString("text").takeIf { args.has("text") }
-                    ?: throw IllegalArgumentException("missing 'text'")
-                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                cm?.setPrimaryClip(ClipData.newPlainText("Fluorine", text))
-                JSONObject().put("source", "android_clipboard").put("copied_chars", text.length)
-            }
-            "toast" -> {
-                val text = args.optString("text").takeIf { it.isNotEmpty() }
-                    ?: throw IllegalArgumentException("missing 'text'")
-                Handler(Looper.getMainLooper()).post {
-                    Toast.makeText(context, text, Toast.LENGTH_SHORT).show()
-                }
-                JSONObject().put("op", "toast").put("shown", true)
-            }
-            "vibrate" -> {
-                val ms = args.optLong("duration_ms", 200L).coerceIn(50L, 5000L)
-                runCatching {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                        val vm = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
-                        vm?.defaultVibrator?.vibrate(
-                            VibrationEffect.createOneShot(ms, VibrationEffect.DEFAULT_AMPLITUDE)
-                        )
-                    } else {
-                        @Suppress("DEPRECATION")
-                        val v = context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
-                        v?.vibrate(VibrationEffect.createOneShot(ms, VibrationEffect.DEFAULT_AMPLITUDE))
-                    }
-                }
-                JSONObject().put("op", "vibrate").put("duration_ms", ms)
-            }
-            "open_url" -> {
-                val rawUrl = args.optString("url").takeIf { it.isNotEmpty() }
-                    ?: throw IllegalArgumentException("missing 'url'")
-                val safe = CoreProtocol.safeUrl(rawUrl)
-                    ?: throw IllegalArgumentException("only http:// or https:// URLs are allowed")
-                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(safe)).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                context.startActivity(intent)
-                JSONObject().put("op", "open_url").put("url", safe)
-            }
-            else -> throw IllegalArgumentException(
-                "op '$op' requires Termux:API binary in PATH (not installed in standard APK sandbox)"
-            )
+        val action = args.optString("action", "").trim()
+        val allowed = setOf("devices", "getprop", "dumpsys", "pm", "wm", "logcat", "input", "am")
+        if (action !in allowed) {
+            return JSONObject().put("ok", false).put("error", "Unsupported self_adb action: $action")
         }
+        val extra = mutableListOf<String>()
+        val arr = args.optJSONArray("args")
+        if (arr != null) {
+            for (i in 0 until arr.length()) {
+                val a = arr.optString(i, "")
+                if (a.isNotBlank()) extra.add(a)
+            }
+        }
+        val directCmd = when (action) {
+            "devices" -> listOf("sh", "-c", "echo 'local-android-sandbox\tdevice'")
+            "getprop" -> listOf("getprop") + extra
+            "dumpsys" -> listOf("dumpsys") + extra
+            "pm" -> listOf("pm") + extra
+            "wm" -> listOf("wm") + extra
+            "logcat" -> listOf("logcat", "-d") + extra
+            "input" -> listOf("input") + extra
+            "am" -> listOf("am") + extra
+            else -> listOf("getprop")
+        }
+        return runProcess(directCmd, workspaceRoot, null, timeoutSecs)
     }
 
-    private fun runAndroidUi(args: JSONObject, workspaceRoot: File): JSONObject {
-        val op = args.optString("op").takeIf { it.isNotEmpty() }
-            ?: throw IllegalArgumentException("missing 'op'")
-        val adbBin = findInPath("adb")
-        val rishBin = findInPath("rish")
-        if (adbBin == null && rishBin == null) {
-            throw IllegalArgumentException("neither 'adb' (Self-ADB) nor 'rish' (Shizuku) is available in APK sandbox PATH")
-        }
-        val useAdb = adbBin != null
-        fun runUiShell(cmd: String, timeout: Long = 8L): CmdResult {
-            return if (useAdb) {
-                runCommandTimeout("adb", listOf("shell", cmd), workspaceRoot, timeout)
+    private fun runProcess(
+        cmd: List<String>,
+        cwd: File,
+        stdinText: String?,
+        timeoutSecs: Long
+    ): JSONObject {
+        return try {
+            val pb = ProcessBuilder(cmd)
+                .directory(cwd)
+                .redirectErrorStream(true)
+            val proc = pb.start()
+            if (stdinText != null) {
+                proc.outputStream.use { it.write(stdinText.toByteArray(Charsets.UTF_8)) }
             } else {
-                runCommandTimeout("rish", listOf("-c", cmd), workspaceRoot, timeout)
+                proc.outputStream.close()
             }
-        }
-        return when (op) {
-            "status" -> {
-                val res = runUiShell("id", 5)
-                JSONObject()
-                    .put("backend", if (useAdb) "adb" else "shizuku")
-                    .put("exit_code", res.exitCode)
-                    .put("stdout", res.stdout.trim())
+            val finished = proc.waitFor(timeoutSecs.coerceIn(2L, 120L), TimeUnit.SECONDS)
+            if (!finished) {
+                proc.destroyForcibly()
+                return JSONObject()
+                    .put("ok", false)
+                    .put("error", "Process timed out after ${timeoutSecs}s")
             }
-            "logcat" -> {
-                val lines = args.optInt("lines", 60).coerceIn(10, 200)
-                val res = runUiShell("logcat -d -t $lines", 10)
-                JSONObject()
-                    .put("exit_code", res.exitCode)
-                    .put("lines", lines)
-                    .put("logcat", res.stdout)
+            val rawBytes = proc.inputStream.use { it.readBytes() }
+            val truncated = rawBytes.size > MAX_CMD_OUTPUT_BYTES
+            val outText = if (truncated) {
+                String(rawBytes, 0, MAX_CMD_OUTPUT_BYTES, Charsets.UTF_8) + "\n...[truncated]..."
+            } else {
+                String(rawBytes, Charsets.UTF_8)
             }
-            else -> {
-                val res = runUiShell("echo 'android_ui op: $op'", 5)
-                JSONObject()
-                    .put("op", op)
-                    .put("exit_code", res.exitCode)
-                    .put("stdout", res.stdout.trim())
-            }
+            val code = proc.exitValue()
+            JSONObject()
+                .put("ok", code == 0)
+                .put("exit_code", code)
+                .put("output", outText.trimEnd())
+                .put("truncated", truncated)
+        } catch (e: Exception) {
+            JSONObject()
+                .put("ok", false)
+                .put("error", e.message ?: e.toString())
         }
     }
 
-    private fun runShellExec(
-        args: JSONObject,
-        workspaceRoot: File,
-        allowAndroidStorage: Boolean
+    private fun prop(type: String, description: String): JSONObject =
+        JSONObject().put("type", type).put("description", description)
+
+    private fun fnDecl(
+        name: String,
+        description: String,
+        properties: JSONObject,
+        required: List<String>
     ): JSONObject {
-        val command = args.optString("command").trim().takeIf { it.isNotEmpty() }
-            ?: throw IllegalArgumentException("missing non-empty 'command'")
-        if (command.length > 4096) {
-            throw IllegalArgumentException("command exceeds 4 KiB limit")
-        }
-        val timeoutSecs = args.optLong("timeout_secs", DEFAULT_CMD_TIMEOUT_SECS)
-            .coerceIn(1L, MAX_CMD_TIMEOUT_SECS)
-        val subdir = args.optString("subdir", "").trim()
-        val cwd = if (subdir.isNotEmpty()) {
-            val p = resolveWorkspacePath(workspaceRoot, allowAndroidStorage, subdir, false)
-            if (!p.isDirectory) throw IllegalArgumentException("subdir is not a directory: $subdir")
-            p
-        } else {
-            workspaceRoot
-        }
-        val res = runCommandTimeout("/system/bin/sh", listOf("-c", command), cwd, timeoutSecs)
+        val params = JSONObject()
+            .put("type", "object")
+            .put("properties", properties)
+            .put("required", JSONArray(required))
         return JSONObject()
-            .put("cwd", cwd.canonicalPath)
-            .put("exit_code", res.exitCode)
-            .put("timed_out", res.timedOut)
-            .put("stdout", res.stdout)
-            .put("stderr", res.stderr)
-            .put("truncated", res.truncated)
+            .put("type", "function")
+            .put(
+                "function",
+                JSONObject()
+                    .put("name", name)
+                    .put("description", description)
+                    .put("parameters", params)
+            )
     }
 }

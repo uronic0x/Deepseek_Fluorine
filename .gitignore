@@ -1,9 +1,12 @@
 /target
 /.gradle
+/.kotlin
 /build
 /app/build
 /app/src/main/jniLibs
 /.aistudio
+/.build-outputs
+/public
 local.properties
 *.apk
 *.aab
