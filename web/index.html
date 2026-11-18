@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  <meta name="color-scheme" content="light">
+  <meta name="color-scheme" content="dark light">
   <title>{{APP_DISPLAY_NAME}} · {{APP_SUBTITLE}}</title>
   <link rel="stylesheet" href="/style.css">
   <script type="module" src="/app.js"></script>
@@ -11,54 +11,70 @@
 <body data-app-name="{{APP_NAME}}" data-display-name="{{APP_DISPLAY_NAME}}" data-subtitle="{{APP_SUBTITLE}}">
 <header>
   <a class="brand" href="/"><strong id="brandName">{{APP_DISPLAY_NAME}}</strong><span id="convTitle">{{APP_SUBTITLE}}</span></a>
-  <button id="settingsOpen" class="quiet">连接设置 <span id="keyState">未连接</span></button>
+  <button id="settingsOpen" class="quiet">连接与工具设置 <span id="keyState">未连接</span></button>
 </header>
 
 <main>
   <nav aria-label="工作模式">
-    <div class="tabs">
-      <button id="chatMode" aria-pressed="true">Chat <span>直接对话</span></button>
-      <button id="workMode" aria-pressed="false">Work <span>计划 · 取证 · 本地执行 · 审查</span></button>
+    <div class="tabs modeCapsule">
+      <button id="chatMode" aria-pressed="true">Chat</button>
+      <button id="workMode" aria-pressed="false">Work</button>
     </div>
     <button id="newChat" class="quiet">＋ 新会话</button>
   </nav>
 
   <section id="welcome">
-    <div class="eyebrow">DeepSeek 2026-11 API · 本地确定性计算 · Android/Termux Harness</div>
-    <h1>想清楚，<br>再动手执行。</h1>
-    <p>Chat 支持按需联网与深度思考；Work 支持四步协同、本地确定性计算，以及工作区读写/Git/Termux-API/Self-ADB/Shell 本地能力。</p>
+    <div class="eyebrow">FLUORINE WORKBENCH</div>
+    <h2>DeepSeek 2026-11 本地工作台</h2>
+    <p>Chat 与 Work 独立会话；Work 支持自定义系统提示词、工具注入、Shell 与设备控制。</p>
   </section>
 
   <section id="messages" aria-label="对话记录" aria-live="polite"></section>
 
   <section id="taskPanel" hidden>
-    <div class="taskheading"><span>WORKSPACE</span><span id="taskStatus">准备开始</span></div>
-    <ol id="steps">
-      <li>01 拆解目标</li>
-      <li>02 联网取证</li>
-      <li>03 本地工具执行</li>
-      <li>04 文本审查</li>
-    </ol>
-    <details id="planBox"><summary>任务计划</summary><pre id="planText"></pre></details>
-    <details id="toolsBox"><summary>本地工具调用记录</summary><pre id="toolsText"></pre></details>
-    <details id="reviewBox"><summary>审核记录 · 非独立事实核查</summary><pre id="reviewText"></pre></details>
+    <div class="taskheading"><span>AGENT WORKSPACE</span><span id="taskStatus">准备开始</span></div>
+    <details id="toolsBox" open><summary>本地工具调用记录</summary><pre id="toolsText"></pre></details>
   </section>
 
   <div class="composerWrap">
     <form id="composer">
       <label class="sr-only" for="prompt">你的问题或任务</label>
-      <textarea id="prompt" rows="2" placeholder="写下一个问题，或交给 Work 拆解并调用本机能力…" required maxlength="40000"></textarea>
-      <div class="composerActions">
-        <label class="toggle"><input id="web" type="checkbox" checked><span>联网</span></label>
-        <label class="toggle" id="localToolsWrap" hidden><input id="localTools" type="checkbox" checked><span>本地工具</span></label>
-        <label class="toggle" id="deviceToolsWrap" hidden><input id="deviceTools" type="checkbox" checked><span>设备/Shell</span></label>
-        <span id="modeHint">由模型按需搜索</span>
-        <button id="stop" type="button" hidden>停止</button>
-        <button id="send" type="submit" aria-label="发送">发送 ↑</button>
+      <textarea id="prompt" rows="2" placeholder="输入问题或任务…" maxlength="40000"></textarea>
+      <div class="composerBar">
+        <div class="composerPills">
+          <button id="thinkToggle" type="button" class="pillToggle" aria-pressed="true">Think</button>
+          <button id="webToggle" type="button" class="pillToggle" aria-pressed="true">Search</button>
+        </div>
+        <div class="composerRight">
+          <button id="attachToggle" type="button" class="circleBtn" aria-expanded="false" aria-label="上传图片或文件">＋</button>
+          <button id="stop" type="button" class="circleBtn stopBtn" hidden aria-label="停止生成">■</button>
+          <button id="send" type="submit" class="circleBtn sendBtn" aria-label="发送">↑</button>
+        </div>
       </div>
     </form>
+
+    <section id="attachmentDrawer" hidden>
+      <div id="attachStrip" class="attachStrip">
+        <button id="addMoreTile" type="button" class="addMoreTile">＋<span>Add more</span></button>
+      </div>
+      <div id="pdfPurposeRow" class="pdfPurposeRow" hidden>
+        <span>文档解析：</span>
+        <button type="button" class="pillToggle small" data-purpose="text_recognition" aria-pressed="true">纯文字</button>
+        <button type="button" class="pillToggle small" data-purpose="rich_layout_recognition" aria-pressed="false">图文混排</button>
+      </div>
+      <div id="attachUnavailable" class="attachNotice" hidden></div>
+      <div class="attachCards">
+        <button id="pickCamera" type="button" class="attachCard"><span>📷</span><strong>Camera</strong></button>
+        <button id="pickPhoto" type="button" class="attachCard"><span>🖼</span><strong>Photo</strong></button>
+        <button id="pickDocument" type="button" class="attachCard"><span>📎</span><strong>Document</strong></button>
+      </div>
+      <input id="cameraInput" type="file" accept="image/*" capture="environment" hidden>
+      <input id="photoInput" type="file" accept="image/*" multiple hidden>
+      <input id="docInput" type="file" accept=".pdf,.doc,.docx,.ppt,.pptx,.xlsx,.epub,.txt,.md,.json,.csv" hidden>
+    </section>
+
     <div class="under">
-      <span id="status" role="status">Key 与对话仅在当前页面内存中保留</span>
+      <span id="status" role="status">Chat 与 Work 会话已隔离</span>
       <button id="export" class="quiet">导出 Markdown ↓</button>
     </div>
   </div>
@@ -72,39 +88,76 @@
 <dialog id="settings">
   <form method="dialog">
     <div class="dialoghead">
-      <h2>连接你的 DeepSeek</h2>
+      <h2>全局与工具设置</h2>
       <button class="quiet" value="close" aria-label="关闭">×</button>
     </div>
-    <p>使用官方 API Key。Work 模式支持 9 项确定性计算与 10 项工作区/Git/Termux/ADB/Shell 工具。</p>
+    <p>所有系统提示词与 Work 工具注入均可在下方自定义修改。</p>
+
     <label for="key">API Key</label>
     <input id="key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-…">
+
+    <label for="baseUrl">API Base URL（留空默认官方端点）</label>
+    <input id="baseUrl" type="url" autocomplete="off" spellcheck="false" placeholder="https://api.deepseek.com">
+
     <label for="model">模型</label>
     <select id="model">
-      <option value="deepseek-flash">DeepSeek Flash (V4.1-Flash-1017) · 支持官方联网与本地工具</option>
-      <option value="deepseek-v4-pro">DeepSeek V4 Pro (V4-Pro-0813) · 支持本地工具（不支持官方联网）</option>
+      <option value="deepseek-flash">deepseek-flash · 支持多模态、官方联网与本地工具</option>
+      <option value="deepseek-v4-pro">deepseek-v4-pro · 深度推理（纯文本，不支持多模态）</option>
     </select>
-    <label for="effort">思考强度</label>
+
+    <label for="customModel">自定义模型 ID（可选，覆盖上方选择）</label>
+    <input id="customModel" type="text" autocomplete="off" spellcheck="false" placeholder="留空使用上方预设模型">
+
+    <label for="effort">思考强度 (reasoning_effort)</label>
     <select id="effort">
-      <option value="none">关闭 · 更快</option>
-      <option value="low">Low</option>
-      <option value="high" selected>High</option>
-      <option value="max">Max · 更多时间与用量</option>
+      <option value="none">none · 关闭</option>
+      <option value="low">low</option>
+      <option value="high" selected>high</option>
+      <option value="max">max</option>
     </select>
-    <label for="budget">单次执行输出预算（含思考）</label>
+
+    <label for="budget">单次执行输出预算（max_tokens）</label>
     <select id="budget">
       <option value="8192">8,192 tokens</option>
       <option value="16384" selected>16,384 tokens</option>
       <option value="32768">32,768 tokens</option>
-      <option value="65536">65,536 tokens (64K 思考默认)</option>
-      <option value="131072">131,072 tokens (128K)</option>
-      <option value="393216">393,216 tokens (384K 上限)</option>
+      <option value="65536">65,536 tokens</option>
+      <option value="131072">131,072 tokens</option>
+      <option value="393216">393,216 tokens</option>
     </select>
+
+    <label for="maxRounds">Work 最大工具调用轮数 (1-50)</label>
+    <input id="maxRounds" type="number" min="1" max="50" value="20">
+
+    <label for="chatPrompt">Chat 系统提示词（可完全自定义）</label>
+    <textarea id="chatPrompt" rows="3"></textarea>
+
+    <label for="workPrompt">Work 系统提示词（可完全自定义）</label>
+    <textarea id="workPrompt" rows="4"></textarea>
+
+    <div class="toolGroupBox">
+      <div class="toolGroupHeader">
+        <strong>Work 模式工具注入配置</strong>
+        <button id="resetPromptsBtn" type="button" class="quiet">恢复默认提示词</button>
+      </div>
+      <div class="toolChecks">
+        <label class="checkItem"><input id="toolDeterministic" type="checkbox" checked><span>确定性计算 (calc/stats/csv/hash…)</span></label>
+        <label class="checkItem"><input id="toolWorkspaceRead" type="checkbox" checked><span>工作区只读 (device_probe/fs_list/read/search)</span></label>
+        <label class="checkItem"><input id="toolWorkspaceWrite" type="checkbox" checked><span>工作区写入 (fs_write/fs_edit)</span></label>
+        <label class="checkItem"><input id="toolGit" type="checkbox" checked><span>Git 检视 (git_inspect)</span></label>
+        <label class="checkItem"><input id="toolShellExec" type="checkbox"><span>允许任意 Shell 命令 (shell_exec)</span></label>
+        <label class="checkItem"><input id="toolDeviceControl" type="checkbox"><span>允许设备控制 (termux_device/android_ui)</span></label>
+      </div>
+      <label for="disabledTools">额外禁用指定工具（逗号分隔工具名，可选）</label>
+      <input id="disabledTools" type="text" placeholder="例如：stats, text_diff">
+    </div>
+
     <div class="settingsActions">
       <button id="discover" type="button" class="quiet">检测 Key / 本机能力</button>
       <button value="save">完成</button>
     </div>
     <pre id="modelInfo"></pre>
-    <p class="fine">固定连接 api.deepseek.com。无第三方中转、云端会话库或自动重试。刷新页面后需重新输入 Key。</p>
+    <p class="fine">刷新页面会清空内存中的 Key。</p>
   </form>
 </dialog>
 </body>

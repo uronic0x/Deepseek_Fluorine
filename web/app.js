@@ -1,12 +1,16 @@
 import {
-  readCompletion,
-  citationPoints,
-  sourceList,
-  usageText,
+  DEFAULT_CHAT_SYSTEM_PROMPT,
+  DEFAULT_WORK_SYSTEM_PROMPT,
   buildLatestReminder,
+  buildUserContentBlocks,
+  citationPoints,
   formatServerToolEvent,
+  readCompletion,
   sanitizeHistoryMessage,
   slugifyAppName,
+  sourceList,
+  supportsMultimodal,
+  usageText,
 } from './core.js';
 
 const $ = id => document.getElementById(id);
@@ -19,10 +23,24 @@ const appMeta = {
 };
 
 let mode = 'chat';
-let history = [];
-let reports = [];
 let controller = null;
 let busy = false;
+let useThinking = true;
+let useWeb = true;
+let drawerOpen = false;
+let pdfPurpose = 'text_recognition';
+let pendingAttachments = [];
+let discoveredCapabilities = {};
+
+// Separate Chat and Work sessions so mode switching never mixes turns in the same conversation.
+const sessions = {
+  chat: { history: [], reports: [], uiMessages: [], title: '' },
+  work: { history: [], reports: [], uiMessages: [], title: '' },
+};
+
+function currentSession() {
+  return sessions[mode];
+}
 
 function status(t) {
   $('status').textContent = t;
@@ -34,9 +52,8 @@ function keyState() {
 
 function applyAppMeta() {
   $('brandName').textContent = appMeta.displayName;
-  if (!history.length) {
-    $('convTitle').textContent = appMeta.subtitle;
-  }
+  const sess = currentSession();
+  $('convTitle').textContent = sess.title || appMeta.subtitle;
   document.title = `${appMeta.displayName} · ${appMeta.subtitle}`;
 }
 
@@ -53,66 +70,213 @@ async function loadMeta() {
   } catch {}
 }
 
+$('chatPrompt').value = DEFAULT_CHAT_SYSTEM_PROMPT;
+$('workPrompt').value = DEFAULT_WORK_SYSTEM_PROMPT;
 applyAppMeta();
 loadMeta();
 
 $('settingsOpen').onclick = () => $('settings').showModal();
 $('key').addEventListener('input', keyState);
+$('resetPromptsBtn').onclick = () => {
+  $('chatPrompt').value = DEFAULT_CHAT_SYSTEM_PROMPT;
+  $('workPrompt').value = DEFAULT_WORK_SYSTEM_PROMPT;
+  status('已恢复默认 Chat / Work 系统提示词');
+};
 
-function syncWorkToggles() {
-  const isWork = mode === 'work';
-  $('localToolsWrap').hidden = !isWork;
-  $('deviceToolsWrap').hidden = !isWork || !$('localTools').checked;
+function currentModel() {
+  return $('customModel').value.trim() || $('model').value;
+}
+
+function syncAttachmentCapabilities() {
+  const model = currentModel();
+  const supported = supportsMultimodal(model, discoveredCapabilities);
+  $('attachToggle').classList.toggle('disabled', !supported);
+  for (const id of ['pickCamera', 'pickPhoto', 'pickDocument']) {
+    $(id).classList.toggle('disabled', !supported);
+  }
+  const notice = $('attachUnavailable');
+  if (!supported) {
+    notice.hidden = false;
+    notice.textContent = `当前模型 (${model}) 不支持图片或文件上传；请切换为 deepseek-flash 或其他多模态模型。`;
+  } else {
+    notice.hidden = true;
+    notice.textContent = '';
+  }
+  return supported;
+}
+
+function syncPills() {
+  $('thinkToggle').setAttribute('aria-pressed', String(useThinking));
+  $('webToggle').setAttribute('aria-pressed', String(useWeb));
 }
 
 function setMode(m) {
-  if (busy) return;
+  if (busy || m === mode) return;
   mode = m;
   $('chatMode').setAttribute('aria-pressed', String(m === 'chat'));
   $('workMode').setAttribute('aria-pressed', String(m === 'work'));
-  syncWorkToggles();
-  $('modeHint').textContent =
-    m === 'work'
-      ? '计划 → 联网取证（可选）→ 本地工具/设备执行 → 审查'
-      : '由模型按需搜索';
+  renderCurrentSession();
+  status(`已切换至独立的 ${m === 'work' ? 'Work' : 'Chat'} 会话`);
 }
 
 $('chatMode').onclick = () => setMode('chat');
 $('workMode').onclick = () => setMode('work');
-$('localTools').onchange = syncWorkToggles;
 
-$('model').onchange = () => {
-  if ($('model').value !== 'deepseek-flash') {
-    $('web').checked = false;
-    status('Pro 已关闭官方联网（仍可使用 Work 本地工具与设备能力）。');
-  }
+$('thinkToggle').onclick = () => {
+  if (busy) return;
+  useThinking = !useThinking;
+  syncPills();
 };
 
-$('web').onchange = () => {
-  if ($('web').checked && $('model').value !== 'deepseek-flash') {
-    $('web').checked = false;
-    status('官方联网请在设置中选择 Flash。');
+$('webToggle').onclick = () => {
+  if (busy) return;
+  if (!useWeb && currentModel() === 'deepseek-v4-pro') {
+    status('deepseek-v4-pro 默认不支持官方联网，可在模型中选择 deepseek-flash。');
+    return;
   }
+  useWeb = !useWeb;
+  syncPills();
+};
+
+$('model').onchange = syncAttachmentCapabilities;
+$('customModel').oninput = syncAttachmentCapabilities;
+
+$('attachToggle').onclick = () => {
+  if (!syncAttachmentCapabilities() && !drawerOpen) {
+    status(`当前模型 (${currentModel()}) 暂不支持多模态上传`);
+    drawerOpen = true;
+  } else {
+    drawerOpen = !drawerOpen;
+  }
+  $('attachmentDrawer').hidden = !drawerOpen;
+  $('attachToggle').setAttribute('aria-expanded', String(drawerOpen));
+  $('attachToggle').textContent = drawerOpen ? '×' : '＋';
+};
+
+function renderAttachmentStrip() {
+  const strip = $('attachStrip');
+  const addTile = $('addMoreTile');
+  strip.replaceChildren(addTile);
+  let hasDoc = false;
+  for (const att of pendingAttachments) {
+    if (att.kind === 'document') hasDoc = true;
+    const chip = document.createElement('div');
+    chip.className = 'attachChip';
+    if (att.kind === 'image' && att.dataUrl) {
+      const img = document.createElement('img');
+      img.src = att.dataUrl;
+      img.alt = att.name;
+      chip.append(img);
+    } else {
+      const name = document.createElement('span');
+      name.textContent = att.name.slice(0, 12);
+      chip.append(name);
+    }
+    const rm = document.createElement('button');
+    rm.type = 'button';
+    rm.className = 'chipRemove';
+    rm.textContent = '×';
+    rm.onclick = () => {
+      pendingAttachments = pendingAttachments.filter(x => x.id !== att.id);
+      renderAttachmentStrip();
+    };
+    chip.append(rm);
+    strip.append(chip);
+  }
+  $('pdfPurposeRow').hidden = !hasDoc;
+}
+
+document.querySelectorAll('#pdfPurposeRow button').forEach(btn => {
+  btn.onclick = () => {
+    pdfPurpose = btn.dataset.purpose;
+    document.querySelectorAll('#pdfPurposeRow button').forEach(b => {
+      b.setAttribute('aria-pressed', String(b === btn));
+    });
+  };
+});
+
+function guardMultimodalClick(inputId) {
+  if (!syncAttachmentCapabilities()) {
+    status(`当前模型 (${currentModel()}) 不支持文件或图片上传`);
+    return;
+  }
+  $(inputId).click();
+}
+
+$('addMoreTile').onclick = () => guardMultimodalClick('photoInput');
+$('pickCamera').onclick = () => guardMultimodalClick('cameraInput');
+$('pickPhoto').onclick = () => guardMultimodalClick('photoInput');
+$('pickDocument').onclick = () => guardMultimodalClick('docInput');
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('读取文件失败'));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function handleSelectedImages(files) {
+  for (const f of files) {
+    if (f.size > 1500 * 1024) {
+      status(`${f.name} 超过 Web 端单次请求体积限制，请压缩后再试`);
+      continue;
+    }
+    const dataUrl = await readFileAsDataUrl(f);
+    pendingAttachments.push({
+      id: crypto.randomUUID(),
+      kind: 'image',
+      name: f.name,
+      mimeType: f.type || 'image/jpeg',
+      dataUrl,
+    });
+  }
+  renderAttachmentStrip();
+}
+
+$('cameraInput').onchange = async e => {
+  await handleSelectedImages([...(e.target.files || [])]);
+  e.target.value = '';
+};
+
+$('photoInput').onchange = async e => {
+  await handleSelectedImages([...(e.target.files || [])]);
+  e.target.value = '';
+};
+
+$('docInput').onchange = async e => {
+  const file = e.target.files?.[0];
+  e.target.value = '';
+  if (!file) return;
+  if (file.size > 1400 * 1024) {
+    status(`${file.name} 超过 1.4 MiB 限制`);
+    return;
+  }
+  const dataUrl = await readFileAsDataUrl(file);
+  const comma = dataUrl.indexOf(',');
+  const base64 = comma >= 0 ? dataUrl.slice(comma + 1) : '';
+  pendingAttachments.push({
+    id: crypto.randomUUID(),
+    kind: 'document',
+    name: file.name,
+    mimeType: file.type || 'application/octet-stream',
+    dataBase64: base64,
+    purpose: pdfPurpose,
+  });
+  renderAttachmentStrip();
 };
 
 function lock(value) {
   busy = value;
-  for (const id of [
-    'send',
-    'newChat',
-    'chatMode',
-    'workMode',
-    'web',
-    'localTools',
-    'deviceTools',
-    'settingsOpen',
-  ]) {
+  for (const id of ['send', 'newChat', 'chatMode', 'workMode', 'settingsOpen', 'attachToggle']) {
     $(id).disabled = value;
   }
   $('stop').hidden = !value;
+  $('send').hidden = value;
 }
 
-function message(role, text = '') {
+function appendMessageBox(role, text = '') {
   $('welcome').hidden = true;
   const box = document.createElement('article');
   box.className = 'message ' + role;
@@ -215,13 +379,56 @@ function extras(box, raw, usage, model) {
   box.append(metaRow);
 }
 
-async function run(stage, messages, config, target, localTools = false) {
-  const progress = document.createElement('div');
-  progress.className = 'progress';
-  progress.textContent = '正在连接…';
-  if (target) target.box.append(progress);
-  try {
-    const response = await fetch('/api/chat', {
+function renderCurrentSession() {
+  const sess = currentSession();
+  $('messages').replaceChildren();
+  $('taskPanel').hidden = mode !== 'work' || !sess.uiMessages.length;
+  $('welcome').hidden = sess.uiMessages.length > 0;
+  $('convTitle').textContent = sess.title || appMeta.subtitle;
+  for (const item of sess.uiMessages) {
+    const t = appendMessageBox(item.role, item.text || '');
+    if (item.raw) {
+      renderAnswer(t.answer, item.raw);
+      extras(t.box, item.raw, item.usage, item.model);
+    }
+    if (item.warning) {
+      const banner = document.createElement('div');
+      banner.className = 'incompleteBanner';
+      banner.textContent = item.warning;
+      t.box.append(banner);
+    }
+  }
+}
+
+function readToolConfig() {
+  const disabled = $('disabledTools')
+    .value.split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+  return {
+    deterministic: $('toolDeterministic').checked,
+    workspace_read: $('toolWorkspaceRead').checked,
+    workspace_write: $('toolWorkspaceWrite').checked,
+    git: $('toolGit').checked,
+    shell_exec: $('toolShellExec').checked,
+    device_control: $('toolDeviceControl').checked,
+    disabled_tools: disabled,
+  };
+}
+
+function currentPlatformLabel() {
+  return appMeta.runtime?.is_android ? 'Android' : 'Web';
+}
+
+async function uploadPendingDocuments(config) {
+  const resolved = [];
+  for (const att of pendingAttachments) {
+    if (att.kind !== 'document' || att.fileId) {
+      resolved.push(att);
+      continue;
+    }
+    status(`正在上传文档 ${att.name}…`);
+    const resp = await fetch('/api/files', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -229,237 +436,195 @@ async function run(stage, messages, config, target, localTools = false) {
       },
       signal: controller.signal,
       body: JSON.stringify({
-        stage,
-        model: config.model,
-        web: config.web,
-        local_tools: localTools,
-        device_tools: localTools && config.deviceTools,
-        effort: config.effort,
-        max_tokens: stage === 'plan' ? 1024 : stage === 'review' ? 2048 : config.budget,
-        messages,
+        filename: att.name,
+        mime_type: att.mimeType,
+        purpose: att.purpose || pdfPurpose,
+        data_base64: att.dataBase64,
+        base_url: config.baseUrl,
       }),
     });
-    return await readCompletion(response, ({ message: raw, event, localEvent, thinking }) => {
-      if (target) target.answer.textContent = raw.content;
-      const webStatus = formatServerToolEvent(event);
-      if (localEvent?.type === 'round_started') {
-        progress.textContent = `本地执行第 ${localEvent.round}/${localEvent.max_rounds} 轮…`;
-      } else if (localEvent?.type === 'call_started') {
-        progress.textContent = `调用本地工具：${localEvent.name}(${clipText(localEvent.arguments || '', 48)})`;
-        $('toolsText').textContent += `▶ ${localEvent.name}(${localEvent.arguments})\n`;
-      } else if (localEvent?.type === 'call_completed') {
-        progress.textContent = `已完成：${localEvent.name}`;
-        $('toolsText').textContent += `✓ ${clipText(localEvent.result || '', 600)}\n\n`;
-      } else if (webStatus) {
-        progress.textContent = webStatus;
-      } else if (thinking) {
-        progress.textContent = '正在思考…';
-      } else if (raw.content) {
-        progress.textContent = '正在生成…';
-      }
-      if (stage === 'plan') $('planText').textContent = raw.content;
-      if (stage === 'review') $('reviewText').textContent = raw.content;
-    });
-  } catch (error) {
-    if (error.code === 'content_filter') {
-      if (target) target.answer.replaceChildren();
-      if (stage === 'plan') $('planText').textContent = '';
-      if (stage === 'review') $('reviewText').textContent = '';
+    const parsed = await resp.json();
+    if (!resp.ok || !parsed.id) {
+      throw new Error(parsed.error?.message || `上传文档失败: ${att.name}`);
     }
-    throw error;
-  } finally {
-    progress.remove();
+    resolved.push({ ...att, fileId: parsed.id });
   }
-}
-
-function step(n, text) {
-  $('taskStatus').textContent = text;
-  [...$('steps').children].forEach((el, i) => el.classList.toggle('active', i === n));
-}
-
-function currentPlatformLabel() {
-  return appMeta.runtime?.is_android ? 'Android' : 'Web';
+  return resolved;
 }
 
 $('composer').onsubmit = async e => {
   e.preventDefault();
   if (busy) return;
   const prompt = $('prompt').value.trim();
-  if (!prompt) return;
+  if (!prompt && !pendingAttachments.length) return;
+
   const config = {
     key: $('key').value.trim(),
-    model: $('model').value,
-    web: $('web').checked,
-    localTools: $('localTools').checked,
-    deviceTools: $('deviceTools').checked,
+    baseUrl: $('baseUrl').value.trim(),
+    model: currentModel(),
+    web: useWeb,
+    thinking: useThinking,
     effort: $('effort').value,
     budget: Number($('budget').value),
+    maxRounds: Math.max(1, Math.min(50, Number($('maxRounds').value) || 20)),
+    systemPrompt: (mode === 'work' ? $('workPrompt').value : $('chatPrompt').value).trim(),
+    toolConfig: readToolConfig(),
   };
+
   if (!config.key) {
     $('settings').showModal();
     status('先填入 API Key，再发送。');
     return;
   }
-  if (history.length > (mode === 'work' ? 105 : 114)) {
-    status('会话已接近长度上限，请导出后新建会话。');
-    return;
-  }
 
+  const sess = currentSession();
   controller = new AbortController();
   lock(true);
-  $('prompt').value = '';
-  message('user', prompt);
-
-  const sanitizedPrev = history.map(m =>
-    m.role === 'assistant'
-      ? sanitizeHistoryMessage(m, {
-          keepServerToolCalls: mode === 'chat' && config.web && config.model === 'deepseek-flash',
-        })
-      : m
-  );
-
-  const pending = [
-    ...sanitizedPrev,
-    { role: 'latest_reminder', content: buildLatestReminder(new Date(), currentPlatformLabel()) },
-    { role: 'user', content: prompt },
-  ];
 
   let target = null;
-  let executionCommitted = false;
-  const report = {
-    prompt,
-    mode,
-    model: config.model,
-    effort: config.effort,
-    web: config.web,
-    localTools: config.localTools,
-    deviceTools: config.deviceTools,
-    plan: '',
-    tools: '',
-    review: '',
-    answer: null,
-    usage: [],
-  };
-
+  let attachmentsSnapshot = [...pendingAttachments];
   try {
+    attachmentsSnapshot = await uploadPendingDocuments(config);
+    pendingAttachments = [];
+    renderAttachmentStrip();
+
+    $('prompt').value = '';
+    const userDisplay = attachmentsSnapshot.length
+      ? `${prompt}${prompt ? '\n' : ''}[附件 ${attachmentsSnapshot.length} 个]`
+      : prompt;
+    appendMessageBox('user', userDisplay);
+    sess.uiMessages.push({ role: 'user', text: userDisplay });
+
+    const userContent = buildUserContentBlocks(prompt, attachmentsSnapshot);
+    const keepRc = mode === 'work' || (config.web && config.model === 'deepseek-flash');
+    const sanitizedPrev = sess.history.map(m =>
+      m.role === 'assistant'
+        ? sanitizeHistoryMessage(m, {
+            keepServerToolCalls: mode === 'chat' && config.web && config.model === 'deepseek-flash',
+            keepReasoningContent: keepRc,
+          })
+        : m
+    );
+    const pendingMsgs = [
+      ...sanitizedPrev,
+      { role: 'latest_reminder', content: buildLatestReminder(new Date(), currentPlatformLabel()) },
+      { role: 'user', content: userContent },
+    ];
+
     if (mode === 'work') {
       $('taskPanel').hidden = false;
-      $('planText').textContent = '';
       $('toolsText').textContent = '';
-      $('reviewText').textContent = '';
-      $('planBox').open = true;
+      $('taskStatus').textContent = '执行中…';
+    }
 
-      step(0, '拆解目标');
-      status('Work 1/4：生成计划（不联网）');
-      const p = await run('plan', pending, config, null, false);
-      report.plan = p.message.content;
-      report.usage.push(p.usage);
-      $('planText').textContent = report.plan;
+    target = appendMessageBox('assistant');
+    const progress = document.createElement('div');
+    progress.className = 'progress';
+    progress.textContent = '正在连接…';
+    target.box.append(progress);
 
-      let executeHistory = [
-        ...pending,
-        sanitizeHistoryMessage(p.message),
-        {
-          role: 'user',
-          content: '请按这份计划执行最初任务，交付结果；不要把计划当成已完成的事实。',
+    try {
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${config.key}`,
         },
-      ];
+        signal: controller.signal,
+        body: JSON.stringify({
+          stage: mode,
+          model: config.model,
+          base_url: config.baseUrl || undefined,
+          use_web: config.web,
+          use_thinking: config.thinking,
+          local_tools: mode === 'work',
+          tool_config: mode === 'work' ? config.toolConfig : undefined,
+          max_rounds: config.maxRounds,
+          system_prompt: config.systemPrompt || undefined,
+          effort: config.effort,
+          max_tokens: config.budget,
+          messages: pendingMsgs,
+        }),
+      });
 
-      if (config.web && config.localTools && config.model === 'deepseek-flash') {
-        step(1, '联网取证');
-        status('Work 2/4：联网收集一手资料');
-        const res = await run('research', executeHistory, config, null, false);
-        report.usage.push(res.usage);
-        // Strip server_tool_calls before transitioning into local custom-function execute loop
-        executeHistory = [
-          ...executeHistory,
-          sanitizeHistoryMessage(res.message, { keepServerToolCalls: false }),
-          {
-            role: 'user',
-            content:
-              '请结合以上联网收集的事实，必要时调用本地计算或设备/工作区工具获取精确结果，生成最终交付正文。',
-          },
-        ];
-      } else {
-        step(1, config.web ? '并入执行阶段' : '跳过联网');
+      const result = await readCompletion(
+        response,
+        ({ message: raw, event, localEvent, thinking }) => {
+          target.answer.textContent = raw.content;
+          const webStatus = formatServerToolEvent(event);
+          if (localEvent?.type === 'round_started') {
+            progress.textContent = `本地执行第 ${localEvent.round}/${localEvent.max_rounds} 轮…`;
+            $('taskStatus').textContent = progress.textContent;
+          } else if (localEvent?.type === 'call_started') {
+            progress.textContent = `调用工具：${localEvent.name}(${clipText(localEvent.arguments || '', 48)})`;
+            $('toolsText').textContent += `▶ ${localEvent.name}(${localEvent.arguments})\n`;
+          } else if (localEvent?.type === 'call_completed') {
+            progress.textContent = `已完成：${localEvent.name}`;
+            $('toolsText').textContent += `✓ ${clipText(localEvent.result || '', 600)}\n\n`;
+          } else if (webStatus) {
+            progress.textContent = webStatus;
+          } else if (thinking) {
+            progress.textContent = '正在思考…';
+          } else if (raw.content) {
+            progress.textContent = '正在生成…';
+          }
+        }
+      );
+
+      if (result.title) {
+        sess.title = result.title;
+        $('convTitle').textContent = result.title;
       }
-
-      step(2, config.localTools ? '本地工具执行' : '执行与交付');
-      status(config.localTools ? 'Work：本地工具执行与生成正文' : 'Work：生成交付正文');
-      if (config.localTools) $('toolsBox').open = true;
-      target = message('assistant');
-      const result = await run('execute', executeHistory, config, target, config.localTools);
-      report.answer = result.message;
-      report.tools = $('toolsText').textContent;
-      report.usage.push(result.usage);
-
-      history = [
-        ...executeHistory,
-        sanitizeHistoryMessage(result.message, { keepServerToolCalls: false }),
-      ];
-      executionCommitted = true;
       renderAnswer(target.answer, result.message);
       extras(target.box, result.message, result.usage, config.model);
-
-      step(3, '文本审查');
-      status('Work：审查交付物（不独立联网）');
-      const r = await run(
-        'review',
-        [
-          ...history,
-          {
-            role: 'user',
-            content:
-              '请检查刚才的交付物，指出计算、工具结果、证据或完成度方面的缺口。不要假定计划已经全部完成。',
-          },
-        ],
-        config,
-        null,
-        false
-      );
-      report.review = r.message.content;
-      report.usage.push(r.usage);
-      $('reviewText').textContent = report.review;
-      $('reviewBox').open = true;
-      step(-1, '已完成');
-    } else {
-      target = message('assistant');
-      const result = await run('chat', pending, config, target, false);
-      if (result.title) $('convTitle').textContent = result.title;
-      report.answer = result.message;
-      report.usage.push(result.usage);
-      history = [
-        ...pending,
+      sess.uiMessages.push({
+        role: 'assistant',
+        raw: result.message,
+        usage: result.usage,
+        model: config.model,
+      });
+      sess.history = [
+        ...pendingMsgs,
         sanitizeHistoryMessage(result.message, {
-          keepServerToolCalls: config.web && config.model === 'deepseek-flash',
+          keepServerToolCalls: mode === 'chat' && config.web && config.model === 'deepseek-flash',
+          keepReasoningContent: mode === 'work',
         }),
       ];
-      executionCommitted = true;
-      renderAnswer(target.answer, result.message);
-      extras(target.box, result.message, result.usage, config.model);
+      sess.reports.push({ prompt: userDisplay, mode, model: config.model, answer: result.message, usage: result.usage });
+      if (mode === 'work') $('taskStatus').textContent = '已完成';
+      status('完成 · 用量由上游返回');
+    } finally {
+      progress.remove();
     }
-    reports.push(report);
-    status(mode === 'work' ? 'Work 完成 · 详细用量与记录见导出文件' : '完成 · 用量由上游返回');
   } catch (err) {
     const why =
-      err.name === 'AbortError' ? '已停止本地接收；上游可能仍有已计费用量。' : err.message;
-    if (target && !executionCommitted) {
-      if (err.code === 'content_filter') target.answer.replaceChildren();
-      target.box.classList.add('error');
-      const note = document.createElement('p');
-      note.textContent = '本轮未完成，未加入下一轮上下文。';
-      target.box.append(note);
-    }
-    message('error', why);
-    status(why);
-    if (mode === 'work') step(-1, executionCommitted ? '执行完成，审查未完成' : '任务未完成');
-    if (executionCommitted) {
-      report.review += '\n审查未完成：' + why;
-      reports.push(report);
-      $('reviewText').textContent = report.review;
+      err.name === 'AbortError' ? '已停止接收；已流出的内容已保留。' : err.message;
+    // Non-destructive handling: NEVER wipe streamed content on content_filter, empty reply, or interruption.
+    if (target) {
+      const partial = err.partial;
+      if (partial) {
+        if (partial.content) renderAnswer(target.answer, partial);
+        extras(target.box, partial, err.usage || null, config.model);
+      }
+      const banner = document.createElement('div');
+      banner.className = 'incompleteBanner';
+      banner.textContent = `⚠ ${why}`;
+      target.box.append(banner);
+      sess.uiMessages.push({
+        role: 'assistant',
+        raw: partial || { content: target.answer.textContent || '' },
+        usage: err.usage || null,
+        model: config.model,
+        warning: `⚠ ${why}`,
+      });
     } else {
+      appendMessageBox('error', why);
       $('prompt').value = prompt;
+      pendingAttachments = attachmentsSnapshot;
+      renderAttachmentStrip();
     }
+    if (mode === 'work') $('taskStatus').textContent = '未完成';
+    status(why);
   } finally {
     controller = null;
     lock(false);
@@ -470,13 +635,9 @@ $('stop').onclick = () => controller?.abort();
 
 $('newChat').onclick = () => {
   if (busy) return;
-  history = [];
-  reports = [];
-  $('convTitle').textContent = appMeta.subtitle;
-  $('messages').replaceChildren();
-  $('taskPanel').hidden = true;
-  $('welcome').hidden = false;
-  status('已新建会话 · 刷新页面会清除 Key');
+  sessions[mode] = { history: [], reports: [], uiMessages: [], title: '' };
+  renderCurrentSession();
+  status(`已新建 ${mode === 'work' ? 'Work' : 'Chat'} 会话`);
 };
 
 $('discover').onclick = async () => {
@@ -513,9 +674,14 @@ $('discover').onclick = async () => {
     const v = await r.json();
     if (!r.ok) throw new Error(v.error?.message || `HTTP ${r.status}`);
     lines.push('Key 检测成功。上游返回：');
+    const nextCaps = {};
     for (const m of v.data || []) {
-      lines.push(`${m.id} · context ${m.context_window ?? '1M'} · output ${m.max_output_tokens ?? '384K'}`);
+      if (m.id) nextCaps[m.id] = m;
+      const mods = Array.isArray(m.input_modalities) ? m.input_modalities.join('/') : 'text';
+      lines.push(`${m.id} · modalities=${mods} · context ${m.context_window ?? '1M'}`);
     }
+    discoveredCapabilities = nextCaps;
+    syncAttachmentCapabilities();
     $('modelInfo').textContent = lines.join('\n');
   } catch (err) {
     lines.push(err.name === 'AbortError' ? '检测超时，请稍后手动重试。' : err.message);
@@ -527,28 +693,26 @@ $('discover').onclick = async () => {
 };
 
 $('export').onclick = () => {
-  if (!reports.length) {
+  const sess = currentSession();
+  if (!sess.reports.length) {
     status('尚无已完成的回复可导出。');
     return;
   }
-  const text = reports
+  const text = sess.reports
     .map(
       r =>
-        `# ${r.prompt}\n\n模式：${r.mode} | 模型：${r.model} | effort：${r.effort} | 联网：${r.web} | 本地工具：${r.localTools} | 设备/Shell：${r.deviceTools}\n` +
-        (r.plan ? `\n## 计划\n\n${r.plan}\n` : '') +
-        (r.tools ? `\n## 本地工具记录\n\n\`\`\`\n${r.tools.trim()}\n\`\`\`\n` : '') +
+        `# ${r.prompt}\n\n模式：${r.mode} | 模型：${r.model}\n` +
         `\n## 交付物\n\n${r.answer?.content || ''}\n` +
-        `\n## 来源\n\n${sourceList(r.answer || {})
-          .map(s => `- [${s.title.replace(/[\[\]]/g, '')}](${s.url})`)
-          .join('\n')}\n` +
-        (r.review ? `\n## 文本审查（非独立联网核查）\n\n${r.review}\n` : '') +
-        `\n## 用量\n\n${r.usage.map((u, i) => `- 第 ${i + 1} 次：${usageText(u, r.model)}`).join('\n')}\n`
+        `\n## 用量\n\n- ${usageText(r.usage, r.model)}\n`
     )
     .join('\n---\n\n');
   const url = URL.createObjectURL(new Blob([text], { type: 'text/markdown;charset=utf-8' }));
   const a = document.createElement('a');
   a.href = url;
-  a.download = `${slugifyAppName(appMeta.appName)}-report.md`;
+  a.download = `${slugifyAppName(appMeta.appName)}-${mode}-report.md`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 };
+
+syncPills();
+syncAttachmentCapabilities();

@@ -1,5 +1,49 @@
 // Dependency-free protocol layer shared by UI and Node tests.
 
+export const DEFAULT_CHAT_SYSTEM_PROMPT =
+  '你是 Fluorine（DeepSeek 本地工作台），严谨、直接、重事实的中文技术与研究助手。优先给出可核验结论、关键依据、清晰推导与边界条件。数学公式请使用标准 LaTeX 语法（行内 $...$，独立公式块 $$...$$）。若证据不足或未联网核实，请明确说明不确定性，绝不编造来源、命令输出或实验数据。';
+
+export const DEFAULT_WORK_SYSTEM_PROMPT =
+  '你是 Fluorine（DeepSeek 本地工作台），具备自主规划、取证与本地执行能力的中文技术 Agent。没有固定死板的工作流步骤限制：请根据用户的具体目标，自行判断是否需要拆解计划、是否需要调用联网工具或当前已注入的本地工具（计算/统计/工作区读写/Git/Shell/设备控制）。简单问题直接回答或一步执行；复杂任务自主多轮调用工具验证后再汇总输出。数学公式请使用标准 LaTeX（$...$ 或 $$...$$）。';
+
+export const DEFAULT_MODEL_CAPABILITIES = {
+  'deepseek-flash': { id: 'deepseek-flash', input_modalities: ['text', 'image'] },
+  'deepseek-v4-pro': { id: 'deepseek-v4-pro', input_modalities: ['text'] },
+};
+
+export function supportsMultimodal(modelId, discoveredCapabilities = {}) {
+  const norm = String(modelId || '').trim();
+  const info = discoveredCapabilities[norm] || DEFAULT_MODEL_CAPABILITIES[norm];
+  if (info && Array.isArray(info.input_modalities) && info.input_modalities.length) {
+    return info.input_modalities.some(m =>
+      ['image', 'file', 'vision'].includes(String(m).toLowerCase())
+    );
+  }
+  if (['deepseek-v4-pro', 'deepseek-reasoner', 'deepseek-chat'].includes(norm)) {
+    return false;
+  }
+  return true;
+}
+
+export function buildUserContentBlocks(text, attachments = []) {
+  const cleanText = String(text || '');
+  if (!Array.isArray(attachments) || attachments.length === 0) {
+    return cleanText;
+  }
+  const blocks = [];
+  for (const att of attachments) {
+    if (att?.fileId) {
+      blocks.push({ type: 'file', file_id: att.fileId });
+    } else if (att?.kind === 'image' && att?.dataUrl) {
+      blocks.push({ type: 'image_url', image_url: { url: att.dataUrl } });
+    }
+  }
+  if (cleanText.trim()) {
+    blocks.push({ type: 'text', text: cleanText });
+  }
+  return blocks.length ? blocks : cleanText;
+}
+
 export function safeUrl(raw) {
   try {
     const u = new URL(raw);
@@ -27,12 +71,28 @@ export function buildLatestReminder(date = new Date(), platform = 'Web') {
   return `${y}-${m}-${d},${weekday},Local,${platform},Chinese`;
 }
 
-export function sanitizeHistoryMessage(msg, { keepServerToolCalls = false } = {}) {
+export function sanitizeHistoryMessage(
+  msg,
+  { keepServerToolCalls = false, keepReasoningContent = false } = {}
+) {
   if (!msg || typeof msg !== 'object') return msg;
+  const content = Array.isArray(msg.content)
+    ? structuredClone(msg.content)
+    : typeof msg.content === 'string'
+      ? msg.content
+      : '';
   const out = {
     role: msg.role,
-    content: typeof msg.content === 'string' ? msg.content : '',
+    content,
   };
+  if (
+    msg.role === 'assistant' &&
+    keepReasoningContent &&
+    typeof msg.reasoning_content === 'string' &&
+    msg.reasoning_content
+  ) {
+    out.reasoning_content = msg.reasoning_content;
+  }
   if (
     msg.role === 'assistant' &&
     keepServerToolCalls &&
@@ -86,6 +146,7 @@ export function sourceList(message) {
     const url = safeUrl(s?.url);
     if (url && !found.has(url)) found.set(url, { url, title: s.title || new URL(url).hostname });
   };
+  for (const s of message.sources || []) add(s);
   for (const a of message.annotations || []) {
     if (a.type === 'url_citation') add(a.url_citation);
   }
@@ -149,8 +210,22 @@ export function accumulator(onUpdate = () => {}) {
   let title = null;
   let done = false;
 
+  function makeIncompleteError(msgText, code = 'incomplete') {
+    const error = new Error(msgText);
+    error.code = code;
+    error.finishReason = finish;
+    error.partial = structuredClone(message);
+    error.usage = usage;
+    return error;
+  }
+
   function push(chunk) {
-    if (chunk.error) throw new Error(chunk.error.message || '上游流式生成失败；已发生的用量仍可能计费。');
+    if (chunk.error) {
+      throw makeIncompleteError(
+        chunk.error.message || '上游流式生成失败；已发生的用量仍可能计费。',
+        chunk.error.code || 'upstream_stream_error'
+      );
+    }
     if (chunk.usage) usage = chunk.usage;
     const choice = chunk.choices?.[0];
     if (!choice) {
@@ -159,6 +234,9 @@ export function accumulator(onUpdate = () => {}) {
     }
     const delta = choice.delta || {};
     if (typeof delta.content === 'string') message.content += delta.content;
+    if (typeof delta.refusal === 'string' && delta.refusal) {
+      message.content += (message.content ? '\n' : '') + delta.refusal;
+    }
     if (typeof delta.reasoning_content === 'string') message.reasoning_content += delta.reasoning_content;
     if (typeof delta.title === 'string' && delta.title) title = delta.title;
     if (Array.isArray(delta.server_tool_calls)) {
@@ -169,6 +247,9 @@ export function accumulator(onUpdate = () => {}) {
     }
     if (Array.isArray(delta.annotations)) {
       message.annotations = [...(message.annotations || []), ...delta.annotations];
+    }
+    if (Array.isArray(delta.sources)) {
+      message.sources = [...(message.sources || []), ...delta.sources];
     }
     if (Array.isArray(delta.local_tool_calls)) {
       message.local_tool_calls = delta.local_tool_calls;
@@ -182,7 +263,7 @@ export function accumulator(onUpdate = () => {}) {
     }
     if (choice.finish_reason) finish = choice.finish_reason;
     if (message.content.length + message.reasoning_content.length > 2 * 1024 * 1024) {
-      throw new Error('单条回复过大，已停止接收。');
+      throw makeIncompleteError('单条回复过大，已停止接收。', 'size_limit');
     }
     onUpdate({
       message,
@@ -199,22 +280,30 @@ export function accumulator(onUpdate = () => {}) {
     markDone() {
       done = true;
     },
+    snapshot() {
+      return { message: structuredClone(message), usage, title, finish };
+    },
     result() {
-      if (!done || !finish) throw new Error('事件流中断，回复未完成；请手动重试。');
+      if (!done || !finish) {
+        throw makeIncompleteError('事件流中断，回复未完成；已保留已流出的内容。', 'stream_interrupted');
+      }
       if (finish === 'content_filter') {
-        const error = new Error('上游内容审查拒绝了本轮回复。');
-        error.code = 'content_filter';
-        throw error;
+        throw makeIncompleteError(
+          '上游内容审查触发拒答（content_filter）；已保留已流出的正文。',
+          'content_filter'
+        );
       }
       if (finish !== 'stop') {
         const reasonMap = {
-          length: '输出预算耗尽，当前回复未完成。请提高预算后重试。',
+          length: '输出预算耗尽，当前回复未完成；已保留已流出的正文。',
           insufficient_system_resource: '上游推理资源暂时不足，请稍后手动重试。',
-          aborted: '上游生成过程被中断。',
+          aborted: '上游生成过程被中断；已保留已流出的正文。',
         };
-        throw new Error(reasonMap[finish] || `异常结束状态：${finish}`);
+        throw makeIncompleteError(reasonMap[finish] || `异常结束状态：${finish}`, finish);
       }
-      if (!message.content.trim()) throw new Error('上游未返回正文；不会将思考内容冒充答案。');
+      if (!message.content.trim()) {
+        throw makeIncompleteError('上游返回空正文（可能触发审核或输出为空）。', 'empty_response');
+      }
       return { message: structuredClone(message), usage, title };
     },
   };
@@ -254,7 +343,9 @@ export async function readCompletion(response, onUpdate = () => {}) {
     try {
       v = JSON.parse(data);
     } catch {
-      throw new Error('上游事件 JSON 格式错误。');
+      const err = new Error('上游事件 JSON 格式错误。');
+      err.partial = acc.snapshot().message;
+      throw err;
     }
     acc.push(v);
   }
@@ -263,7 +354,11 @@ export async function readCompletion(response, onUpdate = () => {}) {
     while (!terminal) {
       const { done, value } = await reader.read();
       buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
-      if (buffer.length > 4 * 1024 * 1024) throw new Error('单个事件过大。');
+      if (buffer.length > 4 * 1024 * 1024) {
+        const err = new Error('单个事件过大。');
+        err.partial = acc.snapshot().message;
+        throw err;
+      }
       let match;
       while ((match = /\r?\n\r?\n/.exec(buffer))) {
         const frame = buffer.slice(0, match.index);
@@ -277,6 +372,15 @@ export async function readCompletion(response, onUpdate = () => {}) {
       }
     }
     return acc.result();
+  } catch (err) {
+    if (!err.partial) {
+      const snap = acc.snapshot();
+      if (snap.message.content || snap.message.reasoning_content) {
+        err.partial = snap.message;
+        err.usage = snap.usage;
+      }
+    }
+    throw err;
   } finally {
     await reader.cancel().catch(() => {});
     reader.releaseLock();
