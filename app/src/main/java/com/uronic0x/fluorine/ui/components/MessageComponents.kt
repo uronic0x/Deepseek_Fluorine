@@ -263,46 +263,55 @@ fun MessageItemCard(
                 MessageAttachmentsStrip(attachments = message.attachments)
             }
 
-            // 1. Collapsible Thinking Process
-            if (message.thinking.isNotBlank()) {
-                CollapsibleThinkingBox(
+            // A Work response is an ordered sequence, not one tools header plus a flat answer.
+            // Old sessions have no workSteps, so retain their text/thinking/tool data as one step.
+            val steps = message.workSteps.ifEmpty {
+                listOf(com.uronic0x.fluorine.protocol.WorkStep(
+                    round = 1,
+                    content = message.text,
                     thinking = message.thinking,
-                    initialExpanded = defaultExpandThinking
-                )
+                    localToolCalls = message.localToolCalls,
+                    citations = message.citations
+                ))
+            }
+            steps.forEach { step ->
+                androidx.compose.runtime.key(step.round) {
+                    if (step.thinking.isNotBlank()) {
+                        CollapsibleThinkingBox(
+                            thinking = step.thinking,
+                            initialExpanded = defaultExpandThinking
+                        )
+                    }
+                    if (step.content.isNotBlank()) {
+                        MarkdownMathText(
+                            text = step.content,
+                            citations = step.citations,
+                            enableMarkdown = enableMarkdown,
+                            enableLatex = enableLatex,
+                            baseStyle = MaterialTheme.typography.bodyLarge,
+                            textColor = if (message.isError) {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                MaterialTheme.colorScheme.onSurface
+                            },
+                            onOutsideTap = onOutsideTap
+                        )
+                    }
+                    if (step.localToolCalls.isNotEmpty()) {
+                        CollapsibleToolCallsBox(
+                            toolCalls = step.localToolCalls,
+                            initialExpanded = defaultExpandTools
+                        )
+                    }
+                }
             }
 
-            // 2. Collapsible Local Tool Calls
-            if (message.localToolCalls.isNotEmpty()) {
-                CollapsibleToolCallsBox(
-                    toolCalls = message.localToolCalls,
-                    initialExpanded = defaultExpandTools
-                )
-            }
-
-            // 3. Generated / Modified Workspace File Artifacts
             if (artifacts.isNotEmpty()) {
                 WorkspaceArtifactsSection(
                     artifacts = artifacts,
                     onExport = onExportWorkspaceFile,
                     onShare = onShareWorkspaceFile,
                     onPreview = onPreviewWorkspaceFile
-                )
-            }
-
-            // 4. Main Message Content (Markdown + LaTeX Formula Rendering)
-            if (message.text.isNotBlank()) {
-                MarkdownMathText(
-                    text = message.text,
-                    citations = message.citations,
-                    enableMarkdown = enableMarkdown,
-                    enableLatex = enableLatex,
-                    baseStyle = MaterialTheme.typography.bodyLarge,
-                    textColor = if (message.isError) {
-                        MaterialTheme.colorScheme.error
-                    } else {
-                        MaterialTheme.colorScheme.onSurface
-                    },
-                    onOutsideTap = onOutsideTap
                 )
             }
 

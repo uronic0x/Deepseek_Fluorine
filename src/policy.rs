@@ -228,8 +228,8 @@ pub fn parse_input(raw: &[u8]) -> Result<ChatInput, String> {
     let max_rounds = req
         .get("max_rounds")
         .and_then(Value::as_u64)
-        .unwrap_or(20)
-        .clamp(1, 50) as usize;
+        .unwrap_or(crate::DEFAULT_MAX_TOOL_ROUNDS as u64)
+        .clamp(1, crate::MAX_TOOL_ROUNDS as u64) as usize;
 
     let temperature = if req
         .get("enable_temperature")
@@ -490,6 +490,27 @@ pub fn build_payload(input: ChatInput) -> Result<BuiltPayload, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_round_budget_accepts_expanded_range() {
+        let base = json!({"messages": [{"role": "user", "content": "hello"}]});
+        assert_eq!(
+            parse_input(&serde_json::to_vec(&base).unwrap())
+                .unwrap()
+                .max_rounds,
+            50
+        );
+        for (requested, expected) in [(1, 1), (120, 120), (500, 500), (501, 500)] {
+            let mut request = base.clone();
+            request["max_rounds"] = json!(requested);
+            assert_eq!(
+                parse_input(&serde_json::to_vec(&request).unwrap())
+                    .unwrap()
+                    .max_rounds,
+                expected
+            );
+        }
+    }
 
     #[test]
     fn pro_omits_web_search_while_flash_includes_it_by_default() {

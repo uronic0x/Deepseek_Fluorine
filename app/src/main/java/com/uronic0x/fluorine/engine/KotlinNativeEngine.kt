@@ -27,7 +27,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 object KotlinNativeEngine {
 
     private const val DEFAULT_BASE_URL = "https://api.deepseek.com"
-    private const val DEFAULT_MAX_TOOL_ROUNDS = 10
 
     val KNOWN_MODELS = setOf("deepseek-flash", "deepseek-v4-pro")
     val KNOWN_EFFORTS = setOf("none", "low", "medium", "high", "max")
@@ -655,7 +654,8 @@ object KotlinNativeEngine {
         val connectTimeoutSec = req.optInt("connect_timeout_sec", 20).coerceIn(5, 120)
         val readTimeoutSec = req.optInt("read_timeout_sec", 180).coerceIn(30, 600)
         val shellTimeoutSecs = req.optLong("shell_timeout_secs", 20L).coerceIn(5L, 120L)
-        val maxToolRounds = req.optInt("max_rounds", DEFAULT_MAX_TOOL_ROUNDS).coerceIn(1, 50)
+        val maxToolRounds = req.optInt("max_rounds", CoreProtocol.DEFAULT_MAX_TOOL_ROUNDS)
+            .coerceIn(1, CoreProtocol.MAX_TOOL_ROUNDS)
 
         val wsDirPath = req.optString("workspace_dir", "").trim()
         val workspaceRoot = if (wsDirPath.isNotEmpty()) File(wsDirPath) else defaultWorkspaceDir
@@ -694,6 +694,12 @@ object KotlinNativeEngine {
         val usageAccumulator = UsageAccumulator()
         var finishReason = ""
         var rounds = 0
+        val timeline = com.uronic0x.fluorine.protocol.WorkTimeline()
+
+        fun emit(event: StreamUiEvent) {
+            if (useLocalTools) timeline.accept(event)
+            onEvent?.invoke(event)
+        }
 
         CoreProtocol.AppLogger.info(
             "Engine",
@@ -715,6 +721,7 @@ object KotlinNativeEngine {
                 .put("sources", aggregatedSources)
                 .put("citations", aggregatedCitations)
                 .put("local_tool_calls", localToolRecords)
+                .put("work_steps", CoreProtocol.serializeWorkSteps(timeline.steps))
                 .put("subturn_messages", subturnMessages)
                 .put("usage", usageAccumulator.toJson())
                 .put("finish_reason", finishReason)
@@ -725,7 +732,8 @@ object KotlinNativeEngine {
         }
 
         try {
-            while (rounds < maxToolRounds) {
+            // The budget counts tool batches; allow one final model response after the last batch.
+            while (rounds <= maxToolRounds) {
                 if (handle.cancelled.get()) {
                     return buildFinalResponse(
                         ok = false,
@@ -735,8 +743,10 @@ object KotlinNativeEngine {
                 }
 
                 rounds++
+                if (rounds > maxToolRounds) payload.put("tool_choice", "none")
+                if (useLocalTools) emit(StreamUiEvent.RoundStarted(rounds))
                 if (rounds > 1) {
-                    onEvent?.invoke(StreamUiEvent.Status("第 $rounds 轮推理中..."))
+                    emit(StreamUiEvent.Status("第 $rounds 轮推理中..."))
                 }
 
                 val roundRes = executeSingleStreamRound(
@@ -752,14 +762,14 @@ object KotlinNativeEngine {
                         } else {
                             aggregatedThinking.append(delta)
                         }
-                        onEvent?.invoke(StreamUiEvent.ThinkingDelta(delta))
+                        emit(StreamUiEvent.ThinkingDelta(delta))
                     },
                     onContentDelta = { delta ->
                         aggregatedContent.append(delta)
-                        onEvent?.invoke(StreamUiEvent.ContentDelta(delta))
+                        emit(StreamUiEvent.ContentDelta(delta))
                     },
                     onStatus = { statusText ->
-                        onEvent?.invoke(StreamUiEvent.Status(statusText))
+                        emit(StreamUiEvent.Status(statusText))
                     }
                 )
 
@@ -792,6 +802,7 @@ object KotlinNativeEngine {
                 val roundThinking = roundRes.optString("thinking", "")
 
                 val roundCitations = roundRes.optJSONArray("citations") ?: JSONArray()
+                timeline.setCitations(CoreProtocol.parseCitationsArray(roundCitations))
                 if (roundCitations.length() > 0) {
                     while (aggregatedCitations.length() > 0) aggregatedCitations.remove(0)
                     for (i in 0 until roundCitations.length()) {
@@ -861,12 +872,11 @@ object KotlinNativeEngine {
                     return buildFinalResponse(ok = true)
                 }
 
-                // If model still demands tool calls on the final allowed round, fail cleanly without dropping outputs
-                if (rounds >= maxToolRounds) {
+                if (rounds > maxToolRounds) {
                     return buildFinalResponse(
                         ok = false,
-                        errorMsg = "达到最大工具交互轮次上限 ($maxToolRounds 轮)，任务尚未收敛。",
-                        incompleteNotice = "已达到最大工具交互轮次上限 ($maxToolRounds 轮)，已保留历史结果与已流出的内容。"
+                        errorMsg = "达到最大工具交互轮次上限 ($maxToolRounds 轮)",
+                        incompleteNotice = "已达到工具轮次上限，已保留当前输出；可在设置中调大上限。"
                     )
                 }
 
@@ -913,7 +923,7 @@ object KotlinNativeEngine {
                     val fnName = fn.optString("name", "")
                     val fnArgs = fn.optString("arguments", "{}")
 
-                    onEvent?.invoke(StreamUiEvent.Status("正在执行工具：$fnName"))
+                    emit(StreamUiEvent.Status("正在执行工具：$fnName"))
                     val roundSourcesCollector = mutableListOf<JSONObject>()
                     val toolOutputObj = executeLocalTool(
                         name = fnName,
@@ -957,7 +967,7 @@ object KotlinNativeEngine {
                         .put("output", toolOutputStr)
                     localToolRecords.put(recordObj)
 
-                    onEvent?.invoke(
+                    emit(
                         StreamUiEvent.ToolRecord(
                             LocalToolCallRecord(
                                 round = rounds,
@@ -1066,7 +1076,10 @@ object KotlinNativeEngine {
             val contentType = (conn.contentType ?: "").lowercase()
             if (!contentType.contains("text/event-stream")) {
                 val text = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-                return parseNonStreamingResponse(text)
+                return parseNonStreamingResponse(text).also { result ->
+                    result.optString("thinking", "").takeIf { it.isNotEmpty() }?.let(onThinkingDelta)
+                    result.optString("content", "").takeIf { it.isNotEmpty() }?.let(onContentDelta)
+                }
             }
 
             BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8)).use { reader ->

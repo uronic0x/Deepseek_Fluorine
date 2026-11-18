@@ -1594,29 +1594,54 @@ private fun ModelInferenceSettingsTab(
 }
 
 @Composable
+private fun AgentLimitField(
+    label: String,
+    value: Int,
+    minimum: Int,
+    maximum: Int,
+    onValueChange: (Int) -> Unit
+) {
+    var text by remember(value) { mutableStateOf(value.toString()) }
+    val valid = text.toIntOrNull()?.let { it in minimum..maximum } == true
+    OutlinedTextField(
+        value = text,
+        onValueChange = { raw ->
+            text = raw
+            raw.toIntOrNull()?.takeIf { it in minimum..maximum }?.let(onValueChange)
+        },
+        label = { Text(label) },
+        supportingText = { Text("范围 $minimum–$maximum；当前生效值 $value") },
+        isError = !valid,
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        modifier = Modifier.fillMaxWidth()
+    )
+}
+
+@Composable
 private fun AgentPromptSettingsTab(
     draft: FluorineSettingsDraft,
     onDraftChange: (FluorineSettingsDraft) -> Unit
 ) {
     SettingsSectionCard(title = "Work 自主 Agent 调度与上下文缓存") {
+        AgentLimitField(
+            label = stringResource(R.string.settings_max_tool_rounds_label),
+            value = draft.maxToolRounds,
+            minimum = 1,
+            maximum = CoreProtocol.MAX_TOOL_ROUNDS,
+            onValueChange = { onDraftChange(draft.copy(maxToolRounds = it)) }
+        )
+        AgentLimitField(
+            label = stringResource(R.string.settings_max_history_label),
+            value = draft.maxHistoryTurns,
+            minimum = 4,
+            maximum = CoreProtocol.MAX_HISTORY_MESSAGES,
+            onValueChange = { onDraftChange(draft.copy(maxHistoryTurns = it)) }
+        )
         Text(
-            text = "${stringResource(R.string.settings_max_tool_rounds_label)}：${draft.maxToolRounds} 轮",
-            style = MaterialTheme.typography.labelLarge
-        )
-        Slider(
-            value = draft.maxToolRounds.toFloat(),
-            onValueChange = { onDraftChange(draft.copy(maxToolRounds = it.roundToInt())) },
-            valueRange = 1f..30f
-        )
-
-        Text(
-            text = "${stringResource(R.string.settings_max_history_label)}：${draft.maxHistoryTurns} 条消息",
-            style = MaterialTheme.typography.labelLarge
-        )
-        Slider(
-            value = draft.maxHistoryTurns.toFloat(),
-            onValueChange = { onDraftChange(draft.copy(maxHistoryTurns = it.roundToInt())) },
-            valueRange = 4f..80f
+            text = "工具轮次用尽后仍允许一次收尾回复。上下文按消息条数保留，并保持完整的用户/助手轮次；调大后将在后续请求生效。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
         )
 
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)

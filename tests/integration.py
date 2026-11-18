@@ -83,7 +83,7 @@ class Fake(http.server.BaseHTTPRequestHandler):
                             "message": {
                                 "role": "assistant",
                                 "reasoning_content": "Need to call calc",
-                                "content": "",
+                                "content": "先计算，再给出结论。",
                                 "tool_calls": [
                                     {
                                         "id": "call_1",
@@ -266,6 +266,24 @@ class Integration(unittest.TestCase):
         last_req = SEEN[-1]
         assistant_msg = [m for m in last_req["messages"] if m["role"] == "assistant"][-1]
         self.assertEqual(assistant_msg["reasoning_content"], "Need to call calc")
+
+    def test_one_tool_round_leaves_room_for_the_final_answer(self):
+        status, _, body = self.request(
+            "POST", "/api/chat",
+            self.payload(stage="work", local_tools=True, max_rounds=1),
+        )
+        self.assertEqual(status, 200)
+        frames = [json.loads(line[6:]) for line in body.splitlines()
+                  if line.startswith("data: ") and line[6:] != "[DONE]"]
+        snapshots = [f["choices"][0]["delta"]["work_steps"] for f in frames
+                     if f.get("choices") and "work_steps" in f["choices"][0].get("delta", {})]
+        steps = snapshots[-1]
+        self.assertEqual([s["round"] for s in steps], [1, 2])
+        self.assertEqual(steps[0]["content"], "先计算，再给出结论。")
+        self.assertEqual(steps[0]["local_tool_calls"][0]["name"], "calc")
+        self.assertEqual(steps[1]["content"], "计算结果为 20")
+        self.assertEqual(SEEN[-1]["tool_choice"], "none")
+        self.assertTrue(body.rstrip().endswith("data: [DONE]"))
 
 
 if __name__ == "__main__":

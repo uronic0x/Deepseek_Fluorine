@@ -7,12 +7,64 @@ import {
   citationPoints,
   estimateCostUsd,
   formatServerToolEvent,
+  normalizeToolRounds,
   safeUrl,
   sanitizeHistoryMessage,
   slugifyAppName,
   sourceList,
   supportsMultimodal,
 } from '../web/core.js';
+
+test('tool round settings accept the expanded range and bound invalid input', () => {
+  assert.equal(normalizeToolRounds(''), 50);
+  assert.equal(normalizeToolRounds('bad'), 50);
+  assert.equal(normalizeToolRounds(1), 1);
+  assert.equal(normalizeToolRounds(120), 120);
+  assert.equal(normalizeToolRounds(500), 500);
+  assert.equal(normalizeToolRounds(501), 500);
+  assert.equal(normalizeToolRounds(10.9), 10);
+});
+
+test('Work snapshots preserve commentary/tool ordering without duplicating final content', () => {
+  const acc = accumulator();
+  const tool = { round: 1, id: 'c1', name: 'calc', arguments: '{}', output: '20' };
+  const first = { round: 1, content: '先计算。', thinking: '检查公式', local_tool_calls: [] };
+  acc.push({ choices: [{ delta: { work_steps: [first] } }] });
+  const beforeTool = acc.snapshot();
+  first.local_tool_calls.push(tool);
+  acc.push({ choices: [{ delta: { work_steps: [first], local_tool_calls: [tool] } }] });
+  assert.equal(beforeTool.message.work_steps[0].local_tool_calls.length, 0);
+  const final = { round: 2, content: '结果为 20。', local_tool_calls: [] };
+  acc.push({ choices: [{ delta: { work_steps: [first, final] } }] });
+  acc.push({ choices: [{ delta: { content: final.content }, finish_reason: 'stop' }] });
+  acc.markDone();
+  const { message } = acc.result();
+  assert.deepEqual(message.work_steps.map(s => s.content), ['先计算。', '结果为 20。']);
+  assert.equal(message.work_steps[0].local_tool_calls[0].id, 'c1');
+  assert.equal(message.content, final.content);
+  assert.equal(sanitizeHistoryMessage(message).work_steps, undefined);
+});
+
+test('tool-only partial Work output survives cancellation and retains final usage', () => {
+  const acc = accumulator();
+  const step = { round: 1, content: '', local_tool_calls: [{ id: 'c1', output: '20' }] };
+  acc.push({ choices: [{ delta: { work_steps: [step] } }] });
+  assert.throws(() => acc.push({
+    error: { code: 'cancelled', message: 'Stopped' },
+    usage: { prompt_tokens: 12 },
+  }), err => {
+    assert.equal(err.partial.work_steps[0].local_tool_calls[0].output, '20');
+    assert.equal(err.usage.prompt_tokens, 12);
+    return true;
+  });
+});
+
+test('Work content is included in the existing response size budget', () => {
+  const acc = accumulator();
+  assert.throws(() => acc.push({ choices: [{ delta: {
+    work_steps: [{ round: 1, content: 'x'.repeat(2 * 1024 * 1024) }],
+  } }] }), err => err.code === 'size_limit');
+});
 
 test('safeUrl blocks javascript and credential URLs', () => {
   assert.equal(safeUrl('https://api-docs.deepseek.com/updates'), 'https://api-docs.deepseek.com/updates');

@@ -21,7 +21,8 @@ use std::thread;
 use std::time::Duration;
 
 pub const MAX_ACTIVE: usize = 4;
-pub const MAX_TOOL_ROUNDS: usize = 20;
+pub const DEFAULT_MAX_TOOL_ROUNDS: usize = 50;
+pub const MAX_TOOL_ROUNDS: usize = 500;
 
 /// Unified event sink for both Desktop HTTP SSE streams and Android direct JNI callbacks.
 pub trait EventSink {
@@ -635,12 +636,14 @@ fn run_local_tool_loop_sink(
     max_rounds: usize,
     mut payload: Value,
 ) {
-    let max_rounds = max_rounds.clamp(1, 50);
+    let max_rounds = max_rounds.clamp(1, MAX_TOOL_ROUNDS);
     let mut usage_acc = UsageAcc::default();
     let mut tool_log: Vec<Value> = Vec::new();
+    let mut work_steps: Vec<Value> = Vec::new();
     let mut collected_sources: Vec<Value> = Vec::new();
 
-    for round in 0..max_rounds {
+    // Count tool batches, then reserve a response with tools disabled for the summary.
+    for round in 0..=max_rounds {
         if cancelled.load(Ordering::SeqCst) {
             let _ = sink.send_event(
                 &json!({
@@ -651,7 +654,15 @@ fn run_local_tool_loop_sink(
             );
             return;
         }
-        if round + 1 == max_rounds {
+        if !sink.send_event(
+            &json!({
+                "choices": [{"delta": {}}],
+                "local_tool_event": {"type": "round_started", "round": round + 1, "max_rounds": max_rounds}
+            }).to_string(),
+        ) {
+            return;
+        }
+        if round == max_rounds {
             payload["tool_choice"] = json!("none");
         }
         let resp = agent
@@ -751,18 +762,40 @@ fn run_local_tool_loop_sink(
             .cloned()
             .unwrap_or_default();
 
+        let content_raw = msg.get("content").and_then(Value::as_str).unwrap_or("");
+        let refusal = msg.get("refusal").and_then(Value::as_str).unwrap_or("");
+        let content = if content_raw.is_empty() && !refusal.is_empty() {
+            refusal.to_owned()
+        } else if !refusal.is_empty() {
+            format!("{content_raw}\n{refusal}")
+        } else {
+            content_raw.to_owned()
+        };
+        let reasoning = msg
+            .get("reasoning_content")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        work_steps.push(json!({
+            "round": round + 1,
+            "content": content,
+            "thinking": reasoning,
+            "annotations": msg.get("annotations").cloned().unwrap_or_else(|| json!([])),
+            "local_tool_calls": []
+        }));
+        if !sink
+            .send_event(&json!({"choices": [{"delta": {"work_steps": work_steps}}]}).to_string())
+        {
+            return;
+        }
+
         if finish_reason == "tool_calls" && !tool_calls.is_empty() {
-            if !sink.send_event(
-                &json!({
-                    "choices": [{"delta": {}}],
-                    "local_tool_event": {
-                        "type": "round_started",
-                        "round": round + 1,
-                        "max_rounds": max_rounds,
-                    }
-                })
-                .to_string(),
-            ) {
+            if round == max_rounds {
+                let _ = sink.send_event(
+                    &json!({
+                        "error": {"code": "max_rounds", "message": format!("已达到工具轮次上限（{max_rounds} 轮），已保留当前输出")},
+                        "usage": usage_acc.to_json()
+                    }).to_string(),
+                );
                 return;
             }
 
@@ -828,23 +861,31 @@ fn run_local_tool_loop_sink(
                         &mut collected_sources,
                     )
                 } else {
-                    tools::execute_tool_with_allowlist(
-                        fn_name,
-                        fn_args,
-                        cfg,
-                        Some(enabled_tools),
-                    )
+                    tools::execute_tool_with_allowlist(fn_name, fn_args, cfg, Some(enabled_tools))
                 };
-                tool_log.push(json!({
+                let record = json!({
+                    "round": round + 1,
                     "id": tc_id,
                     "name": fn_name,
                     "arguments": fn_args,
-                    "result": result
-                }));
+                    "result": result,
+                    "output": result
+                });
+                tool_log.push(record.clone());
+                if let Some(calls) = work_steps
+                    .last_mut()
+                    .and_then(|step| step["local_tool_calls"].as_array_mut())
+                {
+                    calls.push(record);
+                }
 
                 if !sink.send_event(
                     &json!({
-                        "choices": [{"delta": {}}],
+                        "choices": [{"delta": {
+                            "work_steps": work_steps,
+                            "local_tool_calls": tool_log,
+                            "sources": collected_sources
+                        }}],
                         "local_tool_event": {
                             "type": "call_completed",
                             "id": tc_id,
@@ -868,19 +909,6 @@ fn run_local_tool_loop_sink(
             continue;
         }
 
-        let content_raw = msg.get("content").and_then(Value::as_str).unwrap_or("");
-        let refusal = msg.get("refusal").and_then(Value::as_str).unwrap_or("");
-        let content = if content_raw.is_empty() && !refusal.is_empty() {
-            refusal.to_owned()
-        } else if !refusal.is_empty() {
-            format!("{content_raw}\n{refusal}")
-        } else {
-            content_raw.to_owned()
-        };
-        let reasoning = msg
-            .get("reasoning_content")
-            .and_then(Value::as_str)
-            .unwrap_or("");
         let mut delta = json!({ "content": content });
         if !reasoning.is_empty() {
             delta["reasoning_content"] = json!(reasoning);

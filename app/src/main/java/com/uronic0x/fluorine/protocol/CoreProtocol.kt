@@ -140,6 +140,7 @@ data class WorkToolsConfig(
 }
 
 sealed interface StreamUiEvent {
+    data class RoundStarted(val round: Int) : StreamUiEvent
     data class ThinkingDelta(val delta: String) : StreamUiEvent
     data class ContentDelta(val delta: String) : StreamUiEvent
     data class Status(val text: String) : StreamUiEvent
@@ -173,6 +174,40 @@ data class LocalToolCallRecord(
     val output: String
 )
 
+/** One model response followed by the tools it requested; content/citations stay local to this round. */
+data class WorkStep(
+    val round: Int,
+    val content: String = "",
+    val thinking: String = "",
+    val localToolCalls: List<LocalToolCallRecord> = emptyList(),
+    val citations: List<CitationPoint> = emptyList()
+)
+
+class WorkTimeline {
+    var steps: List<WorkStep> = emptyList()
+        private set
+
+    fun accept(event: StreamUiEvent) {
+        if (event is StreamUiEvent.RoundStarted) {
+            steps = steps + WorkStep(event.round)
+            return
+        }
+        val last = steps.lastOrNull() ?: return
+        val updated = when (event) {
+            is StreamUiEvent.ContentDelta -> last.copy(content = last.content + event.delta)
+            is StreamUiEvent.ThinkingDelta -> last.copy(thinking = last.thinking + event.delta)
+            is StreamUiEvent.ToolRecord -> last.copy(localToolCalls = last.localToolCalls + event.record)
+            else -> return
+        }
+        steps = steps.dropLast(1) + updated
+    }
+
+    fun setCitations(citations: List<CitationPoint>) {
+        val last = steps.lastOrNull() ?: return
+        steps = steps.dropLast(1) + last.copy(citations = citations)
+    }
+}
+
 data class WorkspaceFileArtifact(
     val relativePath: String,
     val fileName: String,
@@ -192,7 +227,8 @@ data class ChatMessage(
     val attachments: List<ChatAttachment> = emptyList(),
     val usageText: String = "",
     val incompleteNotice: String = "",
-    val isError: Boolean = false
+    val isError: Boolean = false,
+    val workSteps: List<WorkStep> = emptyList()
 )
 
 /**
@@ -239,10 +275,24 @@ data class EngineTurnResult(
     val finishReason: String = "",
     val rounds: Int = 1,
     val incompleteNotice: String = "",
-    val error: String = ""
+    val error: String = "",
+    val workSteps: List<WorkStep> = emptyList()
 )
 
 object CoreProtocol {
+
+    const val DEFAULT_MAX_TOOL_ROUNDS = 50
+    const val MAX_TOOL_ROUNDS = 500
+    const val DEFAULT_MAX_HISTORY_MESSAGES = 64
+    const val MAX_HISTORY_MESSAGES = 1000
+
+    /** Slice whole user/assistant groups; tool subturns remain attached to their assistant. */
+    fun recentContext(history: List<ContextTurn>, maxMessages: Int): List<ContextTurn> {
+        val count = maxMessages.coerceIn(4, MAX_HISTORY_MESSAGES)
+        var start = (history.size - count).coerceAtLeast(0)
+        while (start < history.size && history[start].role != "user") start++
+        return history.drop(start)
+    }
 
     const val DEFAULT_API_BASE_URL = "https://api.deepseek.com"
 
@@ -429,6 +479,7 @@ object CoreProtocol {
                 sources = sources,
                 citations = citations,
                 localToolCalls = toolCalls,
+                workSteps = parseWorkSteps(obj.optJSONArray("work_steps")),
                 subturnMessages = subturnMessages,
                 usageText = usageText,
                 promptTokens = promptTokens,
@@ -515,6 +566,37 @@ object CoreProtocol {
             )
         }
         return toolCalls
+    }
+
+    fun parseWorkSteps(arr: JSONArray?): List<WorkStep> = buildList {
+        if (arr != null) for (i in 0 until arr.length()) {
+            val step = arr.optJSONObject(i) ?: continue
+            add(WorkStep(
+                round = step.optInt("round", i + 1),
+                content = step.optString("content", ""),
+                thinking = step.optString("thinking", ""),
+                localToolCalls = parseToolCallsArray(step.optJSONArray("local_tool_calls")),
+                citations = parseCitationsArray(step.optJSONArray("citations"))
+            ))
+        }
+    }
+
+    fun serializeWorkSteps(steps: List<WorkStep>): JSONArray = JSONArray().apply {
+        for (step in steps) put(JSONObject()
+            .put("round", step.round)
+            .put("content", step.content)
+            .put("thinking", step.thinking)
+            .put("local_tool_calls", JSONArray().apply {
+                for (tc in step.localToolCalls) put(JSONObject()
+                    .put("round", tc.round).put("id", tc.id).put("name", tc.name)
+                    .put("arguments", tc.arguments).put("output", tc.output))
+            })
+            .put("citations", JSONArray().apply {
+                for (c in step.citations) put(JSONObject()
+                    .put("offset", c.offset).put("indexes", JSONArray(c.indexes))
+                    .put("start_index", c.startIndex).put("end_index", c.endIndex)
+                    .put("url", c.url).put("title", c.title))
+            }))
     }
 
     /**
@@ -694,6 +776,7 @@ object CoreProtocol {
                 .put("usageText", m.usageText)
                 .put("incompleteNotice", m.incompleteNotice)
                 .put("isError", m.isError)
+                .put("work_steps", serializeWorkSteps(m.workSteps))
 
             val srcArr = JSONArray()
             for (s in m.sources) {
@@ -786,6 +869,7 @@ object CoreProtocol {
                     sources = sources,
                     citations = citations,
                     localToolCalls = toolCalls,
+                    workSteps = parseWorkSteps(m.optJSONArray("work_steps")),
                     attachments = attachments,
                     usageText = m.optString("usageText", ""),
                     incompleteNotice = m.optString("incompleteNotice", ""),

@@ -15,12 +15,14 @@ import com.uronic0x.fluorine.protocol.CoreProtocol
 import com.uronic0x.fluorine.protocol.LocalToolCallRecord
 import com.uronic0x.fluorine.protocol.ModelCapabilityInfo
 import com.uronic0x.fluorine.protocol.StreamUiEvent
+import com.uronic0x.fluorine.protocol.WorkTimeline
 import com.uronic0x.fluorine.protocol.WorkToolsConfig
 import com.uronic0x.fluorine.protocol.WorkspaceFileArtifact
 import com.uronic0x.fluorine.ui.components.FluorineSettingsDraft
 import com.uronic0x.fluorine.ui.theme.AppThemeMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -73,8 +75,8 @@ data class FluorineUiState(
     val discoveredCapabilities: Map<String, ModelCapabilityInfo> = CoreProtocol.DEFAULT_MODEL_CAPABILITIES,
 
     // Agent & Prompt settings
-    val maxToolRounds: Int = 10,
-    val maxHistoryTurns: Int = 24,
+    val maxToolRounds: Int = CoreProtocol.DEFAULT_MAX_TOOL_ROUNDS,
+    val maxHistoryTurns: Int = CoreProtocol.DEFAULT_MAX_HISTORY_MESSAGES,
     val enableLatestReminder: Boolean = true,
     val autoGenerateTitle: Boolean = true,
     val customChatSystemPrompt: String = CoreProtocol.DEFAULT_CHAT_SYSTEM_PROMPT,
@@ -164,8 +166,8 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
         val savedWeb = prefs.getBoolean("use_web", false)
         val savedThinking = prefs.getBoolean("use_thinking", true)
 
-        val maxToolRounds = prefs.getInt("max_tool_rounds", 10).coerceIn(1, 50)
-        val maxHistoryTurns = prefs.getInt("max_history_turns", 24).coerceIn(4, 80)
+        val maxToolRounds = prefs.getInt("max_tool_rounds", CoreProtocol.DEFAULT_MAX_TOOL_ROUNDS).coerceIn(1, CoreProtocol.MAX_TOOL_ROUNDS)
+        val maxHistoryTurns = prefs.getInt("max_history_turns", CoreProtocol.DEFAULT_MAX_HISTORY_MESSAGES).coerceIn(4, CoreProtocol.MAX_HISTORY_MESSAGES)
         val enableLatestReminder = prefs.getBoolean("enable_latest_reminder", true)
         val autoGenerateTitle = prefs.getBoolean("auto_generate_title", true)
 
@@ -862,8 +864,8 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
                 maxTokens = clampedTokens,
                 temperature = draft.temperature,
                 enableTemperature = draft.enableTemperature,
-                maxToolRounds = draft.maxToolRounds,
-                maxHistoryTurns = draft.maxHistoryTurns,
+                maxToolRounds = draft.maxToolRounds.coerceIn(1, CoreProtocol.MAX_TOOL_ROUNDS),
+                maxHistoryTurns = draft.maxHistoryTurns.coerceIn(4, CoreProtocol.MAX_HISTORY_MESSAGES),
                 enableLatestReminder = draft.enableLatestReminder,
                 autoGenerateTitle = draft.autoGenerateTitle,
                 customChatSystemPrompt = chatPromptToSave,
@@ -900,8 +902,8 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
             putInt("max_tokens", clampedTokens)
             putFloat("temperature", draft.temperature)
             putBoolean("enable_temperature", draft.enableTemperature)
-            putInt("max_tool_rounds", draft.maxToolRounds)
-            putInt("max_history_turns", draft.maxHistoryTurns)
+            putInt("max_tool_rounds", draft.maxToolRounds.coerceIn(1, CoreProtocol.MAX_TOOL_ROUNDS))
+            putInt("max_history_turns", draft.maxHistoryTurns.coerceIn(4, CoreProtocol.MAX_HISTORY_MESSAGES))
             putBoolean("enable_latest_reminder", draft.enableLatestReminder)
             putBoolean("auto_generate_title", draft.autoGenerateTitle)
             putString("custom_chat_system_prompt", chatPromptToSave)
@@ -1157,21 +1159,29 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
                         .append(msg.attachments.joinToString(", ") { it.name })
                         .append("\n\n")
                 }
-                if (msg.thinking.isNotBlank()) {
-                    sb.append("<details><summary>深度思考过程</summary>\n\n```text\n")
-                        .append(msg.thinking)
-                        .append("\n```\n</details>\n\n")
+                val steps = msg.workSteps.ifEmpty {
+                    listOf(com.uronic0x.fluorine.protocol.WorkStep(
+                        round = 1, content = msg.text, thinking = msg.thinking,
+                        localToolCalls = msg.localToolCalls
+                    ))
                 }
-                if (msg.localToolCalls.isNotEmpty()) {
-                    sb.append("<details><summary>本地工具调用 (").append(msg.localToolCalls.size).append(")</summary>\n\n```json\n")
-                    msg.localToolCalls.forEach { tc ->
-                        sb.append("[#").append(tc.round).append("] ").append(tc.name)
-                            .append("(").append(tc.arguments).append(")\n-> ")
-                            .append(tc.output).append("\n")
+                for (step in steps) {
+                    if (step.thinking.isNotBlank()) {
+                        sb.append("<details><summary>深度思考过程</summary>\n\n```text\n")
+                            .append(step.thinking).append("\n```\n</details>\n\n")
                     }
-                    sb.append("```\n</details>\n\n")
+                    if (step.content.isNotBlank()) sb.append(step.content).append("\n\n")
+                    if (step.localToolCalls.isNotEmpty()) {
+                        sb.append("<details><summary>本地工具调用 (").append(step.localToolCalls.size)
+                            .append(")</summary>\n\n```text\n")
+                        step.localToolCalls.forEach { tc ->
+                            sb.append("[#").append(tc.round).append("] ").append(tc.name)
+                                .append("(").append(tc.arguments).append(")\n-> ")
+                                .append(tc.output).append("\n")
+                        }
+                        sb.append("```\n</details>\n\n")
+                    }
                 }
-                sb.append(msg.text).append("\n\n")
                 if (msg.incompleteNotice.isNotBlank()) {
                     sb.append("> 注意：").append(msg.incompleteNotice).append("\n\n")
                 }
@@ -1472,6 +1482,7 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
                 val liveThinkingSb = StringBuilder()
                 val liveContentSb = StringBuilder()
                 val liveTools = mutableListOf<LocalToolCallRecord>()
+                val liveTimeline = WorkTimeline()
                 var liveSources = emptyList<com.uronic0x.fluorine.protocol.SearchSource>()
 
                 fun pushLiveMessageUpdate() {
@@ -1482,6 +1493,7 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
                                 thinking = liveThinkingSb.toString(),
                                 text = liveContentSb.toString(),
                                 localToolCalls = liveTools.toList(),
+                                workSteps = liveTimeline.steps,
                                 sources = liveSources
                             )
                         } else {
@@ -1495,37 +1507,48 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
                     )
                 }
 
-                val rawResp = withContext(Dispatchers.IO) {
-                    FluorineBridge.chatCompleteStreamingJson(
-                        requestId = requestId,
-                        requestJson = reqObj.toString(),
-                        onEvent = { ev ->
-                            viewModelScope.launch(Dispatchers.Main) {
-                                when (ev) {
-                                    is StreamUiEvent.ThinkingDelta -> {
-                                        liveThinkingSb.append(ev.delta)
-                                        pushLiveMessageUpdate()
-                                    }
-                                    is StreamUiEvent.ContentDelta -> {
-                                        liveContentSb.append(ev.delta)
-                                        pushLiveMessageUpdate()
-                                    }
-                                    is StreamUiEvent.Status -> {
-                                        _uiState.update { it.copy(taskStatusText = ev.text) }
-                                    }
-                                    is StreamUiEvent.ToolRecord -> {
-                                        liveTools.add(ev.record)
-                                        _uiState.update { it.copy(toolsText = formatToolCallsLog(liveTools)) }
-                                        pushLiveMessageUpdate()
-                                    }
-                                    is StreamUiEvent.SourcesUpdated -> {
-                                        liveSources = ev.sources
-                                        pushLiveMessageUpdate()
-                                    }
-                                }
+                // Drain one ordered event queue before final reconciliation. Per-event launches can
+                // otherwise race the final message and overwrite persisted results with stale deltas.
+                val events = Channel<StreamUiEvent>(Channel.UNLIMITED)
+                val eventJob = launch {
+                    for (ev in events) {
+                        if (isWork) liveTimeline.accept(ev)
+                        when (ev) {
+                            is StreamUiEvent.RoundStarted -> pushLiveMessageUpdate()
+                            is StreamUiEvent.ThinkingDelta -> {
+                                liveThinkingSb.append(ev.delta)
+                                pushLiveMessageUpdate()
+                            }
+                            is StreamUiEvent.ContentDelta -> {
+                                liveContentSb.append(ev.delta)
+                                pushLiveMessageUpdate()
+                            }
+                            is StreamUiEvent.Status -> {
+                                _uiState.update { it.copy(taskStatusText = ev.text) }
+                            }
+                            is StreamUiEvent.ToolRecord -> {
+                                liveTools.add(ev.record)
+                                _uiState.update { it.copy(toolsText = formatToolCallsLog(liveTools)) }
+                                pushLiveMessageUpdate()
+                            }
+                            is StreamUiEvent.SourcesUpdated -> {
+                                liveSources = ev.sources
+                                pushLiveMessageUpdate()
                             }
                         }
-                    )
+                    }
+                }
+                val rawResp = try {
+                    withContext(Dispatchers.IO) {
+                        FluorineBridge.chatCompleteStreamingJson(
+                            requestId = requestId,
+                            requestJson = reqObj.toString(),
+                            onEvent = { events.trySend(it) }
+                        )
+                    }
+                } finally {
+                    events.close()
+                    eventJob.join()
                 }
 
                 val parsed = CoreProtocol.parseEngineTurnResult(rawResp)
@@ -1551,7 +1574,6 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
 
                 val finalTags = buildList {
                     addAll(baseTags)
-                    if (finalTools.isNotEmpty()) add("Tools ×${finalTools.size}")
                     if (!parsed.ok && parsed.finishReason == "content_filter") add("内容审核")
                     else if (!parsed.ok) add("未完整结束")
                 }
@@ -1567,6 +1589,7 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
                             sources = finalSources,
                             citations = parsed.citations,
                             localToolCalls = finalTools,
+                            workSteps = parsed.workSteps.ifEmpty { liveTimeline.steps },
                             usageText = parsed.usageText,
                             incompleteNotice = noticeText,
                             isError = !parsed.ok && !hasPartialOutput
@@ -1638,13 +1661,7 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
         preserveToolSubturns: Boolean
     ): JSONArray {
         val arr = JSONArray()
-        val maxEntries = maxHistoryTurns.coerceIn(2, 100)
-        var startIdx = (history.size - maxEntries).coerceAtLeast(0)
-        // Align startIdx so the slice starts on a "user" turn boundary
-        while (startIdx < history.size && history[startIdx].role != "user") {
-            startIdx++
-        }
-        val sliced = if (startIdx < history.size) history.subList(startIdx, history.size) else emptyList()
+        val sliced = CoreProtocol.recentContext(history, maxHistoryTurns)
 
         for (turn in sliced) {
             if (turn.role == "user") {

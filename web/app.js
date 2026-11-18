@@ -5,6 +5,7 @@ import {
   buildUserContentBlocks,
   citationPoints,
   formatServerToolEvent,
+  normalizeToolRounds,
   readCompletion,
   sanitizeHistoryMessage,
   slugifyAppName,
@@ -291,7 +292,7 @@ function appendMessageBox(role, text = '') {
   return { box, answer };
 }
 
-function renderAnswer(target, raw) {
+function renderTextAnswer(target, raw) {
   const chars = Array.from(raw.content || '');
   let start = 0;
   target.replaceChildren();
@@ -312,12 +313,49 @@ function renderAnswer(target, raw) {
   target.append(document.createTextNode(chars.slice(start).join('')));
 }
 
+function renderAnswer(target, raw) {
+  if (!raw.work_steps?.length) {
+    renderTextAnswer(target, raw);
+    return;
+  }
+  const expanded = new Set([...target.querySelectorAll('details[open]')].map(d => d.dataset.part));
+  target.replaceChildren();
+  for (const step of raw.work_steps) {
+    const section = document.createElement('div');
+    section.className = 'work-step';
+    const detail = (kind, title, text) => {
+      const d = document.createElement('details');
+      d.className = 'thinking';
+      d.dataset.part = `${step.round}:${kind}`;
+      d.open = expanded.has(d.dataset.part);
+      const summary = document.createElement('summary');
+      summary.textContent = title;
+      const pre = document.createElement('pre');
+      pre.textContent = text;
+      d.append(summary, pre);
+      section.append(d);
+    };
+    if (step.thinking?.trim()) detail('thinking', '思考过程', step.thinking);
+    if (step.content) {
+      const text = document.createElement('div');
+      renderTextAnswer(text, { content: step.content, annotations: step.annotations || [] });
+      section.append(text);
+    }
+    if (step.local_tool_calls?.length) {
+      detail('tools', `本地工具调用 (${step.local_tool_calls.length})`, step.local_tool_calls.map(tc =>
+        `${tc.name}(${tc.arguments})\n→ ${tc.output ?? tc.result ?? ''}`
+      ).join('\n\n'));
+    }
+    target.append(section);
+  }
+}
+
 function clipText(s, max = 72) {
   return s.length > max ? s.slice(0, max - 1) + '…' : s;
 }
 
 function extras(box, raw, usage, model) {
-  if (raw.reasoning_content?.trim()) {
+  if (!raw.work_steps?.length && raw.reasoning_content?.trim()) {
     const det = document.createElement('details');
     det.className = 'thinking';
     const sum = document.createElement('summary');
@@ -327,7 +365,7 @@ function extras(box, raw, usage, model) {
     det.append(sum, pre);
     box.insertBefore(det, box.querySelector('.answer'));
   }
-  if (raw.local_tool_calls?.length) {
+  if (!raw.work_steps?.length && raw.local_tool_calls?.length) {
     const group = document.createElement('div');
     group.className = 'sources';
     group.setAttribute('aria-label', '本地工具调用');
@@ -466,7 +504,7 @@ $('composer').onsubmit = async e => {
     thinking: useThinking,
     effort: $('effort').value,
     budget: Number($('budget').value),
-    maxRounds: Math.max(1, Math.min(50, Number($('maxRounds').value) || 20)),
+    maxRounds: normalizeToolRounds($('maxRounds').value),
     systemPrompt: (mode === 'work' ? $('workPrompt').value : $('chatPrompt').value).trim(),
     toolConfig: readToolConfig(),
   };
@@ -550,7 +588,7 @@ $('composer').onsubmit = async e => {
       const result = await readCompletion(
         response,
         ({ message: raw, event, localEvent, thinking }) => {
-          target.answer.textContent = raw.content;
+          renderAnswer(target.answer, raw);
           const webStatus = formatServerToolEvent(event);
           if (localEvent?.type === 'round_started') {
             progress.textContent = `本地执行第 ${localEvent.round}/${localEvent.max_rounds} 轮…`;
@@ -603,7 +641,7 @@ $('composer').onsubmit = async e => {
     if (target) {
       const partial = err.partial;
       if (partial) {
-        if (partial.content) renderAnswer(target.answer, partial);
+        if (partial.content || partial.work_steps?.length) renderAnswer(target.answer, partial);
         extras(target.box, partial, err.usage || null, config.model);
       }
       const banner = document.createElement('div');

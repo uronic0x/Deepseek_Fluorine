@@ -1,5 +1,15 @@
 // Dependency-free protocol layer shared by UI and Node tests.
 
+export const DEFAULT_MAX_TOOL_ROUNDS = 50;
+export const MAX_TOOL_ROUNDS = 500;
+
+export function normalizeToolRounds(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0
+    ? Math.max(1, Math.min(MAX_TOOL_ROUNDS, Math.floor(n)))
+    : DEFAULT_MAX_TOOL_ROUNDS;
+}
+
 export const DEFAULT_CHAT_SYSTEM_PROMPT =
   '你是 Fluorine（DeepSeek 本地工作台），严谨、直接、重事实的中文技术与研究助手。优先给出可核验结论、关键依据、清晰推导与边界条件。数学公式请使用标准 LaTeX 语法（行内 $...$，独立公式块 $$...$$）。若证据不足或未联网核实，请明确说明不确定性，绝不编造来源、命令输出或实验数据。';
 
@@ -220,13 +230,13 @@ export function accumulator(onUpdate = () => {}) {
   }
 
   function push(chunk) {
+    if (chunk.usage) usage = chunk.usage;
     if (chunk.error) {
       throw makeIncompleteError(
         chunk.error.message || '上游流式生成失败；已发生的用量仍可能计费。',
         chunk.error.code || 'upstream_stream_error'
       );
     }
-    if (chunk.usage) usage = chunk.usage;
     const choice = chunk.choices?.[0];
     if (!choice) {
       onUpdate({ message, usage, title, localEvent: chunk.local_tool_event });
@@ -251,6 +261,9 @@ export function accumulator(onUpdate = () => {}) {
     if (Array.isArray(delta.sources)) {
       message.sources = [...(message.sources || []), ...delta.sources];
     }
+    if (Array.isArray(delta.work_steps)) {
+      message.work_steps = structuredClone(delta.work_steps);
+    }
     if (Array.isArray(delta.local_tool_calls)) {
       message.local_tool_calls = delta.local_tool_calls;
     }
@@ -262,7 +275,7 @@ export function accumulator(onUpdate = () => {}) {
       message.reasoning_content += '\n';
     }
     if (choice.finish_reason) finish = choice.finish_reason;
-    if (message.content.length + message.reasoning_content.length > 2 * 1024 * 1024) {
+    if (JSON.stringify(message).length > 2 * 1024 * 1024) {
       throw makeIncompleteError('单条回复过大，已停止接收。', 'size_limit');
     }
     onUpdate({
@@ -375,7 +388,7 @@ export async function readCompletion(response, onUpdate = () => {}) {
   } catch (err) {
     if (!err.partial) {
       const snap = acc.snapshot();
-      if (snap.message.content || snap.message.reasoning_content) {
+      if (snap.message.content || snap.message.reasoning_content || snap.message.work_steps?.length) {
         err.partial = snap.message;
         err.usage = snap.usage;
       }
