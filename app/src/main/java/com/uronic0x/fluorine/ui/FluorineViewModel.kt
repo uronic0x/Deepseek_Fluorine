@@ -188,36 +188,24 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
         val infoRaw = FluorineBridge.engineInfoJson()
         val engineLabel = buildEngineLabel(infoRaw)
 
-        val (loadedSessions, activeId) = loadSessionsFromDisk()
-        // 启动时总是进入一个空白新对话：
-        // - 若上次激活的会话本身就是空白会话，直接复用，避免堆积空白会话；
-        // - 否则在列表最前面新建一个空白会话作为启动会话（保留历史会话列表）。
-        val lastActive = loadedSessions.firstOrNull { it.id == activeId } ?: loadedSessions.first()
+        // 启动即进入一个「内存中的空白会话」，不读写磁盘历史——保证首屏秒开。
+        // 历史会话（以及工作区文件）随后在 IO 线程异步加载，加载完成后合并进列表。
         val startupMode = prefs.getString("mode", "chat") ?: "chat"
-        val (startupSessions, startupSession) = if (lastActive.chatMessages.isEmpty()) {
-            loadedSessions to lastActive
-        } else {
-            val blank = ConversationSession(
-                id = UUID.randomUUID().toString(),
-                title = if (startupMode == "work") "新 Work 任务" else "新对话",
-                mode = startupMode,
-                createdAt = System.currentTimeMillis(),
-                updatedAt = System.currentTimeMillis(),
-                chatMessages = emptyList(),
-                contextHistory = emptyList()
-            )
-            val list = listOf(blank) + loadedSessions
-            persistSessionsToDisk(list, blank.id)
-            list to blank
-        }
-
+        val startupSession = ConversationSession(
+            id = UUID.randomUUID().toString(),
+            title = if (startupMode == "work") "新 Work 任务" else "新对话",
+            mode = startupMode,
+            createdAt = System.currentTimeMillis(),
+            updatedAt = System.currentTimeMillis(),
+            chatMessages = emptyList(),
+            contextHistory = emptyList()
+        )
         val effectiveModel = customModel.ifBlank { savedModel }
         val effectiveWeb = if (effectiveModel == "deepseek-v4-pro" && !unlockWebSearch) false else savedWeb
-        val wsFiles = CoreProtocol.listWorkspaceFiles(workspaceDir)
 
         _uiState.update {
             it.copy(
-                sessions = startupSessions,
+                sessions = listOf(startupSession),
                 activeSessionId = startupSession.id,
                 conversationTitle = startupSession.title,
                 mode = startupSession.mode,
@@ -254,9 +242,29 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
                 allowSdcardReadonly = savedSdcard,
                 shellTimeoutSec = shellTimeoutSec,
                 workspacePath = workspaceDir.absolutePath,
-                workspaceFiles = wsFiles,
+                workspaceFiles = emptyList(),
                 engineInfo = infoRaw,
                 engineLabel = engineLabel
+            )
+        }
+        // 异步加载历史会话与工作区文件，加载完成后合并（不覆盖当前空白会话）。
+        viewModelScope.launch {
+            val (loadedSessions, _) = withContext(Dispatchers.IO) { loadSessionsFromDisk() }
+            val wsFiles = withContext(Dispatchers.IO) { CoreProtocol.listWorkspaceFiles(workspaceDir) }
+            _uiState.update { state ->
+                // 始终保留当前激活会话在列表首位（它可能是刚产生的对话），
+                // 再把磁盘历史中不重复的会话补充到后面。
+                val current = state.sessions.firstOrNull { it.id == state.activeSessionId }
+                val merged = if (current != null) {
+                    listOf(current) + loadedSessions.filter { it.id != current.id }
+                } else {
+                    loadedSessions
+                }
+                state.copy(sessions = merged, workspaceFiles = wsFiles)
+            }
+            CoreProtocol.AppLogger.info(
+                "App",
+                "History loaded async: sessions=${loadedSessions.size} wsFiles=${wsFiles.size}"
             )
         }
     }
