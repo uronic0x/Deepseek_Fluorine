@@ -1,6 +1,6 @@
 [package]
 name = "fluorine"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 license = "MIT"
 description = "Minimal auditable DeepSeek Chat / Work client with local computation and tool calling"

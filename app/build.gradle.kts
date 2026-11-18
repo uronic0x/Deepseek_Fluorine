@@ -39,8 +39,8 @@ android {
         applicationId = "com.uronic0x.fluorine"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.3.0"
+        versionCode = 2
+        versionName = "0.3.1"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
