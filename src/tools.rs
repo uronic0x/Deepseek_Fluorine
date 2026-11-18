@@ -189,6 +189,34 @@ pub fn tool_definitions(include_device_tools: bool) -> Value {
     defs
 }
 
+pub fn canonical_tool_name(name: &str) -> &str {
+    match name {
+        "calc_eval" => "calc",
+        "stats_summary" => "stats",
+        _ => name,
+    }
+}
+
+pub fn tool_definitions_for(enabled: &std::collections::HashSet<String>) -> Value {
+    let all = tool_definitions(true);
+    let filtered = all
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter(|item| {
+                    item.pointer("/function/name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|n| {
+                            enabled.contains(canonical_tool_name(n)) || enabled.contains(n)
+                        })
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Value::Array(filtered)
+}
+
 pub fn execute_tool(name: &str, args_json: &str, cfg: &AppConfig, allow_device_tools: bool) -> String {
     let args: Value = match serde_json::from_str(args_json) {
         Ok(v) => v,
@@ -200,7 +228,7 @@ pub fn execute_tool(name: &str, args_json: &str, cfg: &AppConfig, allow_device_t
         })
         .to_string();
     }
-    let out = match name {
+    let out = match canonical_tool_name(name) {
         "calc" => run_calc(&args),
         "stats" => run_stats(&args),
         "unit_convert" => run_unit_convert(&args),
@@ -216,6 +244,25 @@ pub fn execute_tool(name: &str, args_json: &str, cfg: &AppConfig, allow_device_t
         Ok(v) => v.to_string(),
         Err(e) => json!({ "error": e }).to_string(),
     }
+}
+
+pub fn execute_tool_with_allowlist(
+    name: &str,
+    args_json: &str,
+    cfg: &AppConfig,
+    enabled: Option<&std::collections::HashSet<String>>,
+) -> String {
+    if let Some(allow) = enabled {
+        let canon = canonical_tool_name(name);
+        if !allow.contains(canon) && !allow.contains(name) {
+            return json!({
+                "ok": false,
+                "error": format!("tool '{name}' is disabled in current Work tool configuration")
+            })
+            .to_string();
+        }
+    }
+    execute_tool(name, args_json, cfg, true)
 }
 
 // --- Shunting-Yard Math Evaluator ---
@@ -1450,5 +1497,19 @@ mod tests {
         let safe_catalog = tool_definitions(false);
         let full_catalog = tool_definitions(true);
         assert!(full_catalog.as_array().unwrap().len() > safe_catalog.as_array().unwrap().len());
+
+        let mut custom = std::collections::HashSet::new();
+        custom.insert("calc".to_string());
+        custom.insert("shell_exec".to_string());
+        let defs = tool_definitions_for(&custom);
+        assert_eq!(defs.as_array().unwrap().len(), 2);
+
+        let denied = execute_tool_with_allowlist("stats", r#"{"numbers":[1,2]}"#, &cfg, Some(&custom));
+        let dv: Value = serde_json::from_str(&denied).unwrap();
+        assert!(dv["error"].as_str().unwrap().contains("disabled"));
+
+        let allowed = execute_tool_with_allowlist("calc", r#"{"expression":"2+2"}"#, &cfg, Some(&custom));
+        let av: Value = serde_json::from_str(&allowed).unwrap();
+        assert_eq!(av["value"], 4.0);
     }
 }

@@ -112,7 +112,7 @@ fn status_reason(code: u16) -> &'static str {
     }
 }
 
-const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 pub fn write_response(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8]) {
     let head = format!(

@@ -8,7 +8,7 @@ use config::AppConfig;
 use http::{pipe_sse, read_request, start_sse, write_response, write_sse_data, HttpRequest, MAX_BODY};
 use policy::{build_payload, parse_input};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -37,11 +37,13 @@ struct UsageAcc {
     cache_hit: u64,
     cache_miss: u64,
     reasoning_tokens: u64,
+    web_search_reqs: u64,
+    read_url_reqs: u64,
 }
 
 impl UsageAcc {
     fn to_json(&self) -> Value {
-        json!({
+        let mut obj = json!({
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "prompt_cache_hit_tokens": self.cache_hit,
@@ -49,7 +51,14 @@ impl UsageAcc {
             "completion_tokens_details": {
                 "reasoning_tokens": self.reasoning_tokens
             }
-        })
+        });
+        if self.web_search_reqs > 0 || self.read_url_reqs > 0 {
+            obj["server_tool_use"] = json!({
+                "tool_search": self.web_search_reqs,
+                "tool_fetch": self.read_url_reqs
+            });
+        }
+        obj
     }
 }
 
@@ -71,6 +80,18 @@ fn add_usage(total: &mut UsageAcc, u: &Value) {
         .pointer("/completion_tokens_details/reasoning_tokens")
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    if let Some(stu) = u.get("server_tool_use") {
+        total.web_search_reqs += stu
+            .get("tool_search")
+            .or_else(|| stu.get("web_search_requests"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        total.read_url_reqs += stu
+            .get("tool_fetch")
+            .or_else(|| stu.get("read_url_requests"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+    }
 }
 
 pub fn upstream_error_msg(code: u16) -> &'static str {
@@ -140,7 +161,7 @@ pub fn get_meta_json_str(cfg: &AppConfig) -> String {
     config::meta_json(cfg, runtime).to_string()
 }
 
-/// Direct in-process model discovery against `https://api.deepseek.com/models`.
+/// Direct in-process model discovery against `{base}/models`.
 pub fn fetch_models_json_str(base: &str, api_key: &str) -> String {
     let authorization = match validate_api_key(api_key) {
         Ok(v) => v,
@@ -165,10 +186,11 @@ pub fn fetch_models_json_str(base: &str, api_key: &str) -> String {
     };
     let code = upstream.status().as_u16();
     if !(200..300).contains(&code) {
+        let detail = read_upstream_error_body(&mut upstream, code);
         return json!({
             "error": {
                 "code": "upstream_error",
-                "message": upstream_error_msg(code)
+                "message": detail
             }
         })
         .to_string();
@@ -193,7 +215,283 @@ pub fn fetch_models_json_str(base: &str, api_key: &str) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-/// Execute a chat or 20-round local tool loop directly into an `EventSink` (no HTTP loopback required).
+fn decode_base64(input: &str) -> Result<Vec<u8>, &'static str> {
+    let mut vals = Vec::with_capacity(input.len());
+    let mut pad = 0usize;
+    for b in input.bytes() {
+        if b.is_ascii_whitespace() {
+            continue;
+        }
+        if b == b'=' {
+            pad += 1;
+            continue;
+        }
+        if pad > 0 {
+            return Err("invalid base64 padding");
+        }
+        let v = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            _ => return Err("invalid base64 character"),
+        };
+        vals.push(v);
+    }
+    if pad > 2 || (vals.len() + pad) % 4 != 0 {
+        return Err("invalid base64 length");
+    }
+    let mut out = Vec::with_capacity((vals.len() * 3) / 4);
+    let mut i = 0;
+    while i + 4 <= vals.len() {
+        let n = ((vals[i] as u32) << 18)
+            | ((vals[i + 1] as u32) << 12)
+            | ((vals[i + 2] as u32) << 6)
+            | (vals[i + 3] as u32);
+        out.push((n >> 16) as u8);
+        out.push((n >> 8) as u8);
+        out.push(n as u8);
+        i += 4;
+    }
+    let rem = vals.len() - i;
+    if rem == 2 {
+        let n = ((vals[i] as u32) << 18) | ((vals[i + 1] as u32) << 12);
+        out.push((n >> 16) as u8);
+    } else if rem == 3 {
+        let n = ((vals[i] as u32) << 18)
+            | ((vals[i + 1] as u32) << 12)
+            | ((vals[i + 2] as u32) << 6);
+        out.push((n >> 16) as u8);
+        out.push((n >> 8) as u8);
+    }
+    Ok(out)
+}
+
+fn build_file_multipart_body(
+    boundary: &str,
+    purpose: &str,
+    filename: &str,
+    mime_type: &str,
+    bytes: &[u8],
+) -> Vec<u8> {
+    let safe_purpose = match purpose.trim() {
+        "text_recognition" | "rich_layout_recognition" | "user_data" => purpose.trim(),
+        _ => "user_data",
+    };
+    let safe_name: String = filename
+        .chars()
+        .map(|c| if matches!(c, '"' | '\r' | '\n' | '\\') { '_' } else { c })
+        .collect();
+    let safe_name = if safe_name.trim().is_empty() {
+        "upload.bin".to_owned()
+    } else {
+        safe_name
+    };
+    let safe_mime: String = mime_type
+        .chars()
+        .filter(|c| !c.is_control() && *c != ';')
+        .collect();
+    let safe_mime = if safe_mime.trim().is_empty() {
+        "application/octet-stream".to_owned()
+    } else {
+        safe_mime
+    };
+
+    let mut body = Vec::with_capacity(bytes.len() + 512);
+    // DeepSeek Files API spec: `purpose` MUST precede `file` in multipart body.
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"purpose\"\r\n\r\n");
+    body.extend_from_slice(safe_purpose.as_bytes());
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        format!(
+            "Content-Disposition: form-data; name=\"file\"; filename=\"{safe_name}\"\r\nContent-Type: {safe_mime}\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(bytes);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    body
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_client_web_tool(
+    name: &str,
+    args_json: &str,
+    agent: &ureq::Agent,
+    base: &str,
+    authorization: &str,
+    allow_web: bool,
+    usage_acc: &mut UsageAcc,
+    collected_sources: &mut Vec<Value>,
+) -> String {
+    if !allow_web {
+        return json!({
+            "ok": false,
+            "error": "Web search/fetch is disabled for this request."
+        })
+        .to_string();
+    }
+    let args: Value = match serde_json::from_str(args_json) {
+        Ok(v) => v,
+        Err(e) => {
+            return json!({ "ok": false, "error": format!("invalid JSON arguments: {e}") })
+                .to_string()
+        }
+    };
+
+    if name == "web_search" {
+        let query = args.get("query").and_then(Value::as_str).unwrap_or("").trim();
+        if query.is_empty() {
+            return json!({ "ok": false, "error": "query is required" }).to_string();
+        }
+        let max_results = args
+            .get("max_results")
+            .or_else(|| args.get("count"))
+            .and_then(Value::as_u64)
+            .unwrap_or(5)
+            .clamp(1, 20);
+        let need_content = args
+            .get("need_content")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let req_body = json!({
+            "query": query.chars().take(128).collect::<String>(),
+            "count": max_results,
+            "need_content": need_content
+        });
+        let mut resp = match agent
+            .post(&format!("{base}/v1/tools/search"))
+            .header("Authorization", authorization)
+            .header("Content-Type", "application/json")
+            .send(req_body.to_string())
+        {
+            Ok(v) => v,
+            Err(e) => {
+                return json!({ "ok": false, "error": format!("search transport failed: {e}") })
+                    .to_string()
+            }
+        };
+        let code = resp.status().as_u16();
+        if !(200..300).contains(&code) {
+            let detail = read_upstream_error_body(&mut resp, code);
+            return json!({ "ok": false, "error": detail }).to_string();
+        }
+        let mut raw = Vec::new();
+        if resp
+            .body_mut()
+            .as_reader()
+            .take(MAX_BODY as u64 + 1)
+            .read_to_end(&mut raw)
+            .is_err()
+            || raw.len() > MAX_BODY
+        {
+            return json!({ "ok": false, "error": "failed reading search response" }).to_string();
+        }
+        let parsed: Value = match serde_json::from_slice(&raw) {
+            Ok(v) => v,
+            Err(_) => {
+                return json!({ "ok": false, "error": "invalid JSON from /v1/tools/search" })
+                    .to_string()
+            }
+        };
+        usage_acc.web_search_reqs += 1;
+        let results = parsed.get("results").cloned().unwrap_or_else(|| json!([]));
+        if let Some(arr) = results.as_array() {
+            for item in arr {
+                let url = item.get("url").and_then(Value::as_str).unwrap_or("").trim();
+                let title = item.get("title").and_then(Value::as_str).unwrap_or("").trim();
+                if !url.is_empty() || !title.is_empty() {
+                    collected_sources.push(json!({
+                        "title": if title.is_empty() { url } else { title },
+                        "url": url,
+                        "snippet": item.get("snippet").or_else(|| item.get("summary")).and_then(Value::as_str).unwrap_or(""),
+                        "site_name": item.get("site_name").and_then(Value::as_str).unwrap_or(""),
+                        "published_at": item.get("date").and_then(Value::as_str).unwrap_or(""),
+                        "cite_index": collected_sources.len() + 1
+                    }));
+                }
+            }
+        }
+        return json!({ "ok": true, "results": results }).to_string();
+    }
+
+    if name == "web_fetch" {
+        let target_url = args.get("url").and_then(Value::as_str).unwrap_or("").trim();
+        if target_url.is_empty() {
+            return json!({ "ok": false, "error": "url is required" }).to_string();
+        }
+        let mut resp = match agent
+            .post(&format!("{base}/v1/tools/fetch"))
+            .header("Authorization", authorization)
+            .header("Content-Type", "application/json")
+            .send(json!({ "url": target_url }).to_string())
+        {
+            Ok(v) => v,
+            Err(e) => {
+                return json!({ "ok": false, "error": format!("fetch transport failed: {e}") })
+                    .to_string()
+            }
+        };
+        let code = resp.status().as_u16();
+        if !(200..300).contains(&code) {
+            let detail = read_upstream_error_body(&mut resp, code);
+            return json!({ "ok": false, "error": detail }).to_string();
+        }
+        let mut raw = Vec::new();
+        if resp
+            .body_mut()
+            .as_reader()
+            .take(MAX_BODY as u64 + 1)
+            .read_to_end(&mut raw)
+            .is_err()
+            || raw.len() > MAX_BODY
+        {
+            return json!({ "ok": false, "error": "failed reading fetch response" }).to_string();
+        }
+        let parsed: Value = match serde_json::from_slice(&raw) {
+            Ok(v) => v,
+            Err(_) => {
+                return json!({ "ok": false, "error": "invalid JSON from /v1/tools/fetch" })
+                    .to_string()
+            }
+        };
+        usage_acc.read_url_reqs += 1;
+        let title = parsed
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or(target_url);
+        let content = parsed.get("content").and_then(Value::as_str).unwrap_or("");
+        let clipped: String = content.chars().take(24_000).collect();
+        let truncated = content.chars().count() > 24_000;
+        let out_content = if truncated {
+            format!("{clipped}\n...[truncated]")
+        } else {
+            clipped
+        };
+        let snippet: String = content.chars().take(180).collect();
+        collected_sources.push(json!({
+            "title": title,
+            "url": target_url,
+            "snippet": snippet,
+            "published_at": parsed.get("date").and_then(Value::as_str).unwrap_or(""),
+            "cite_index": collected_sources.len() + 1
+        }));
+        return json!({
+            "ok": true,
+            "url": target_url,
+            "title": title,
+            "content": out_content
+        })
+        .to_string();
+    }
+
+    json!({ "ok": false, "error": format!("unknown web tool: {name}") }).to_string()
+}
+
+/// Execute a chat or multi-round local tool loop directly into an `EventSink` (no HTTP loopback required).
 pub fn execute_chat_stream(
     sink: &mut dyn EventSink,
     cancelled: &AtomicBool,
@@ -205,46 +503,59 @@ pub fn execute_chat_stream(
     let authorization = match validate_api_key(api_key) {
         Ok(v) => v,
         Err(msg) => {
-            let _ = sink.send_event(&json!({"error": {"code": "key_required", "message": msg}}).to_string());
+            let _ = sink.send_event(
+                &json!({"error": {"code": "key_required", "message": msg}}).to_string(),
+            );
             return;
         }
     };
     let input = match parse_input(request_json) {
         Ok(v) => v,
         Err(m) => {
-            let _ = sink.send_event(&json!({"error": {"code": "invalid_json", "message": m}}).to_string());
+            let _ = sink.send_event(
+                &json!({"error": {"code": "invalid_json", "message": m}}).to_string(),
+            );
             return;
         }
     };
     let built = match build_payload(input) {
         Ok(v) => v,
         Err(m) => {
-            let _ = sink.send_event(&json!({"error": {"code": "invalid_request", "message": m}}).to_string());
+            let _ = sink.send_event(
+                &json!({"error": {"code": "invalid_request", "message": m}}).to_string(),
+            );
             return;
         }
     };
 
+    let effective_base = built.base_url.as_deref().unwrap_or(base);
     let agent = build_http_agent();
+
     if built.use_local_tools {
         run_local_tool_loop_sink(
             sink,
             cancelled,
             &agent,
-            base,
+            effective_base,
             &authorization,
             cfg,
-            built.allow_device_tools,
+            &built.enabled_tools,
+            built.allow_web,
+            built.max_rounds,
             built.body,
         );
         return;
     }
 
     if cancelled.load(Ordering::SeqCst) {
+        let _ = sink.send_event(
+            &json!({"error": {"code": "cancelled", "message": "用户已手动停止生成"}}).to_string(),
+        );
         return;
     }
 
     let mut upstream = match agent
-        .post(&format!("{base}/chat/completions"))
+        .post(&format!("{effective_base}/chat/completions"))
         .header("Authorization", &authorization)
         .header("Content-Type", "application/json")
         .send(built.body.to_string())
@@ -311,6 +622,7 @@ pub fn execute_chat_stream(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_local_tool_loop_sink(
     sink: &mut dyn EventSink,
     cancelled: &AtomicBool,
@@ -318,17 +630,28 @@ fn run_local_tool_loop_sink(
     base: &str,
     authorization: &str,
     cfg: &AppConfig,
-    allow_device_tools: bool,
+    enabled_tools: &HashSet<String>,
+    allow_web: bool,
+    max_rounds: usize,
     mut payload: Value,
 ) {
+    let max_rounds = max_rounds.clamp(1, 50);
     let mut usage_acc = UsageAcc::default();
     let mut tool_log: Vec<Value> = Vec::new();
+    let mut collected_sources: Vec<Value> = Vec::new();
 
-    for round in 0..MAX_TOOL_ROUNDS {
+    for round in 0..max_rounds {
         if cancelled.load(Ordering::SeqCst) {
+            let _ = sink.send_event(
+                &json!({
+                    "error": {"code": "cancelled", "message": "用户已手动停止生成"},
+                    "usage": usage_acc.to_json()
+                })
+                .to_string(),
+            );
             return;
         }
-        if round + 1 == MAX_TOOL_ROUNDS {
+        if round + 1 == max_rounds {
             payload["tool_choice"] = json!("none");
         }
         let resp = agent
@@ -344,7 +667,9 @@ fn run_local_tool_loop_sink(
                 } else {
                     "工具执行中途连接上游失败"
                 };
-                let _ = sink.send_event(&json!({"error": {"message": msg}}).to_string());
+                let _ = sink.send_event(
+                    &json!({"error": {"message": msg}, "usage": usage_acc.to_json()}).to_string(),
+                );
                 return;
             }
         };
@@ -352,7 +677,9 @@ fn run_local_tool_loop_sink(
         let code = upstream.status().as_u16();
         if !(200..300).contains(&code) {
             let detail = read_upstream_error_body(&mut upstream, code);
-            let _ = sink.send_event(&json!({"error": {"message": detail}}).to_string());
+            let _ = sink.send_event(
+                &json!({"error": {"message": detail}, "usage": usage_acc.to_json()}).to_string(),
+            );
             return;
         }
 
@@ -365,14 +692,20 @@ fn run_local_tool_loop_sink(
             .is_err()
             || raw.len() > MAX_BODY
         {
-            let _ = sink.send_event(&json!({"error": {"message": "读取上游响应失败"}}).to_string());
+            let _ = sink.send_event(
+                &json!({"error": {"message": "读取上游响应失败"}, "usage": usage_acc.to_json()})
+                    .to_string(),
+            );
             return;
         }
 
         let body: Value = match serde_json::from_slice(&raw) {
             Ok(v) => v,
             Err(_) => {
-                let _ = sink.send_event(&json!({"error": {"message": "上游返回格式错误"}}).to_string());
+                let _ = sink.send_event(
+                    &json!({"error": {"message": "上游返回格式错误"}, "usage": usage_acc.to_json()})
+                        .to_string(),
+                );
                 return;
             }
         };
@@ -399,7 +732,10 @@ fn run_local_tool_loop_sink(
         let choice = match body.get("choices").and_then(|c| c.get(0)) {
             Some(c) => c,
             None => {
-                let _ = sink.send_event(&json!({"error": {"message": "上游未返回有效 choice"}}).to_string());
+                let _ = sink.send_event(
+                    &json!({"error": {"message": "上游未返回有效 choice"}, "usage": usage_acc.to_json()})
+                        .to_string(),
+                );
                 return;
             }
         };
@@ -422,7 +758,7 @@ fn run_local_tool_loop_sink(
                     "local_tool_event": {
                         "type": "round_started",
                         "round": round + 1,
-                        "max_rounds": MAX_TOOL_ROUNDS,
+                        "max_rounds": max_rounds,
                     }
                 })
                 .to_string(),
@@ -446,6 +782,13 @@ fn run_local_tool_loop_sink(
 
             for tc in &tool_calls {
                 if cancelled.load(Ordering::SeqCst) {
+                    let _ = sink.send_event(
+                        &json!({
+                            "error": {"code": "cancelled", "message": "用户已手动停止生成"},
+                            "usage": usage_acc.to_json()
+                        })
+                        .to_string(),
+                    );
                     return;
                 }
                 let tc_id = tc.get("id").and_then(Value::as_str).unwrap_or("");
@@ -473,7 +816,25 @@ fn run_local_tool_loop_sink(
                     return;
                 }
 
-                let result = tools::execute_tool(fn_name, fn_args, cfg, allow_device_tools);
+                let result = if fn_name == "web_search" || fn_name == "web_fetch" {
+                    execute_client_web_tool(
+                        fn_name,
+                        fn_args,
+                        agent,
+                        base,
+                        authorization,
+                        allow_web,
+                        &mut usage_acc,
+                        &mut collected_sources,
+                    )
+                } else {
+                    tools::execute_tool_with_allowlist(
+                        fn_name,
+                        fn_args,
+                        cfg,
+                        Some(enabled_tools),
+                    )
+                };
                 tool_log.push(json!({
                     "id": tc_id,
                     "name": fn_name,
@@ -507,7 +868,15 @@ fn run_local_tool_loop_sink(
             continue;
         }
 
-        let content = msg.get("content").and_then(Value::as_str).unwrap_or("");
+        let content_raw = msg.get("content").and_then(Value::as_str).unwrap_or("");
+        let refusal = msg.get("refusal").and_then(Value::as_str).unwrap_or("");
+        let content = if content_raw.is_empty() && !refusal.is_empty() {
+            refusal.to_owned()
+        } else if !refusal.is_empty() {
+            format!("{content_raw}\n{refusal}")
+        } else {
+            content_raw.to_owned()
+        };
         let reasoning = msg
             .get("reasoning_content")
             .and_then(Value::as_str)
@@ -518,6 +887,14 @@ fn run_local_tool_loop_sink(
         }
         if !tool_log.is_empty() {
             delta["local_tool_calls"] = json!(tool_log);
+        }
+        if !collected_sources.is_empty() {
+            delta["sources"] = json!(collected_sources);
+        }
+        if let Some(annotations) = msg.get("annotations").and_then(Value::as_array) {
+            if !annotations.is_empty() {
+                delta["annotations"] = Value::Array(annotations.clone());
+            }
         }
         if !sink.send_event(
             &json!({
@@ -544,8 +921,11 @@ fn run_local_tool_loop_sink(
     }
 
     let _ = sink.send_event(
-        &json!({"error":{"message": format!("本地工具调用轮次超过上限（{MAX_TOOL_ROUNDS} 轮）")}})
-            .to_string(),
+        &json!({
+            "error": {"code": "max_rounds", "message": format!("本地工具调用轮次超过上限（{max_rounds} 轮）")},
+            "usage": usage_acc.to_json()
+        })
+        .to_string(),
     );
 }
 
@@ -671,7 +1051,7 @@ pub fn serve(mut stream: TcpStream, port: u16, agent: ureq::Agent, base: &str, c
     if req.header("Origin") != format!("http://{host}") {
         return reply_error(&mut stream, 403, "origin_denied", "仅接受同源页面请求");
     }
-    if req.path != "/api/chat" && req.path != "/api/models" {
+    if req.path != "/api/chat" && req.path != "/api/models" && req.path != "/api/files" {
         return reply_error(&mut stream, 404, "not_found", "没有这个接口");
     }
     if !req.header("Content-Type").starts_with("application/json") {
@@ -681,6 +1061,79 @@ pub fn serve(mut stream: TcpStream, port: u16, agent: ureq::Agent, base: &str, c
         Ok(v) => v,
         Err(m) => return reply_error(&mut stream, 401, "key_required", m),
     };
+
+    if req.path == "/api/files" {
+        let body_json: Value = match serde_json::from_slice(&req.body) {
+            Ok(v) => v,
+            Err(e) => {
+                return reply_error(
+                    &mut stream,
+                    400,
+                    "invalid_json",
+                    &format!("invalid JSON: {e}"),
+                )
+            }
+        };
+        let filename = body_json.get("filename").and_then(Value::as_str).unwrap_or("upload.bin");
+        let mime_type = body_json
+            .get("mime_type")
+            .and_then(Value::as_str)
+            .unwrap_or("application/octet-stream");
+        let purpose = body_json
+            .get("purpose")
+            .and_then(Value::as_str)
+            .unwrap_or("user_data");
+        let data_b64 = body_json
+            .get("data_base64")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if data_b64.is_empty() {
+            return reply_error(&mut stream, 400, "invalid_file", "文件内容不能为空");
+        }
+        let file_bytes = match decode_base64(data_b64) {
+            Ok(b) => b,
+            Err(e) => return reply_error(&mut stream, 400, "invalid_base64", e),
+        };
+        let effective_base = policy::sanitize_base_url(
+            body_json.get("base_url").and_then(Value::as_str),
+        )
+        .unwrap_or_else(|| base.to_owned());
+        let boundary = "----FluorineMultipartBoundary7e2a9c4b";
+        let multipart = build_file_multipart_body(boundary, purpose, filename, mime_type, &file_bytes);
+        let mut upstream = match agent
+            .post(&format!("{effective_base}/files"))
+            .header("Authorization", &authorization)
+            .header("Content-Type", &format!("multipart/form-data; boundary={boundary}"))
+            .send(multipart)
+        {
+            Ok(v) => v,
+            Err(_) => {
+                return reply_error(
+                    &mut stream,
+                    502,
+                    "transport",
+                    "上传文件到上游失败或超时",
+                )
+            }
+        };
+        let code = upstream.status().as_u16();
+        if !(200..300).contains(&code) {
+            let detail = read_upstream_error_body(&mut upstream, code);
+            return reply_error(&mut stream, code, "upstream_error", &detail);
+        }
+        let mut resp_bytes = Vec::new();
+        if upstream
+            .body_mut()
+            .as_reader()
+            .take(MAX_BODY as u64 + 1)
+            .read_to_end(&mut resp_bytes)
+            .is_err()
+            || resp_bytes.len() > MAX_BODY
+        {
+            return reply_error(&mut stream, 502, "upload_failed", "读取文件上传响应失败");
+        }
+        return write_response(&mut stream, 200, "application/json; charset=utf-8", &resp_bytes);
+    }
 
     if req.path == "/api/models" {
         let mut upstream = match agent
@@ -724,6 +1177,7 @@ pub fn serve(mut stream: TcpStream, port: u16, agent: ureq::Agent, base: &str, c
         Ok(v) => v,
         Err(m) => return reply_error(&mut stream, 400, "invalid_request", &m),
     };
+    let effective_base = built.base_url.as_deref().unwrap_or(base);
 
     if built.use_local_tools {
         let cancelled = AtomicBool::new(false);
@@ -735,17 +1189,19 @@ pub fn serve(mut stream: TcpStream, port: u16, agent: ureq::Agent, base: &str, c
             &mut sink,
             &cancelled,
             &agent,
-            base,
+            effective_base,
             &authorization,
             cfg,
-            built.allow_device_tools,
+            &built.enabled_tools,
+            built.allow_web,
+            built.max_rounds,
             built.body,
         );
         return;
     }
 
-    let upstream = match agent
-        .post(&format!("{base}/chat/completions"))
+    let mut upstream = match agent
+        .post(&format!("{effective_base}/chat/completions"))
         .header("Authorization", &authorization)
         .header("Content-Type", "application/json")
         .send(built.body.to_string())
@@ -763,7 +1219,8 @@ pub fn serve(mut stream: TcpStream, port: u16, agent: ureq::Agent, base: &str, c
 
     let code = upstream.status().as_u16();
     if !(200..300).contains(&code) {
-        return reply_error(&mut stream, code, "upstream_error", upstream_error_msg(code));
+        let detail = read_upstream_error_body(&mut upstream, code);
+        return reply_error(&mut stream, code, "upstream_error", &detail);
     }
     let mime = upstream
         .headers()
@@ -870,7 +1327,6 @@ unsafe fn jni_new_string(env: JniEnv, text: &str) -> JString {
     let table = *env;
     let new_str: unsafe extern "C" fn(JniEnv, *const c_char) -> JString =
         std::mem::transmute(*table.add(JNI_NEW_STRING_UTF));
-    // Sanitize interior NULs if any
     let clean: String = text.chars().filter(|&c| c != '\0').collect();
     match CString::new(clean) {
         Ok(cstr) => new_str(env, cstr.as_ptr()),
@@ -981,12 +1437,14 @@ unsafe fn jni_stream_chat_impl(
     }
 }
 
-fn jni_cancel_impl(request_id: i64) {
+fn jni_cancel_impl(request_id: i64) -> u8 {
     if let Ok(map) = cancel_registry().lock() {
         if let Some(flag) = map.get(&request_id) {
             flag.store(true, Ordering::SeqCst);
+            return 1;
         }
     }
+    0
 }
 
 // Export JNI symbols for `com.uronic0x.fluorine.bridge.FluorineBridge`
@@ -1037,6 +1495,62 @@ pub unsafe extern "C" fn Java_com_uronic0x_fluorine_bridge_FluorineBridge_native
     _env: JniEnv,
     _thiz: JObject,
     request_id: i64,
-) {
-    jni_cancel_impl(request_id);
+) -> u8 {
+    jni_cancel_impl(request_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct VecSink(Vec<String>);
+    impl EventSink for VecSink {
+        fn send_event(&mut self, data: &str) -> bool {
+            self.0.push(data.to_owned());
+            true
+        }
+    }
+
+    #[test]
+    fn cancelled_stream_emits_explicit_cancelled_event() {
+        let mut sink = VecSink(Vec::new());
+        let cancelled = AtomicBool::new(true);
+        let cfg = AppConfig::from_env();
+        let req = serde_json::to_vec(&json!({
+            "model": "deepseek-flash",
+            "stage": "chat",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .unwrap();
+        execute_chat_stream(
+            &mut sink,
+            &cancelled,
+            "http://127.0.0.1:9",
+            "sk-test",
+            &req,
+            &cfg,
+        );
+        assert_eq!(sink.0.len(), 1);
+        let v: Value = serde_json::from_str(&sink.0[0]).unwrap();
+        assert_eq!(v["error"]["code"], "cancelled");
+    }
+
+    #[test]
+    fn multipart_file_body_places_purpose_before_file_and_decodes_base64() {
+        let decoded = decode_base64("aGVsbG8=").unwrap();
+        assert_eq!(decoded, b"hello");
+        let body = build_file_multipart_body(
+            "b1",
+            "rich_layout_recognition",
+            "report.pdf",
+            "application/pdf",
+            &decoded,
+        );
+        let s = String::from_utf8_lossy(&body);
+        let p_idx = s.find("name=\"purpose\"").unwrap();
+        let f_idx = s.find("name=\"file\"").unwrap();
+        assert!(p_idx < f_idx);
+        assert!(s.contains("rich_layout_recognition"));
+        assert!(s.contains("filename=\"report.pdf\""));
+    }
 }

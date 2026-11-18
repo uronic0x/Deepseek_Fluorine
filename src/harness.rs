@@ -516,6 +516,25 @@ fn resolve_workspace_path(
     Ok(resolved)
 }
 
+fn allowed_read_roots(cfg: &AppConfig) -> Vec<PathBuf> {
+    let mut roots = vec![cfg.workspace_root.clone()];
+    if cfg.allow_android_storage {
+        for extra in ["/sdcard", "/storage/emulated/0"] {
+            if let Ok(canon) = fs::canonicalize(extra) {
+                roots.push(canon);
+            }
+        }
+    }
+    roots
+}
+
+fn is_canonical_inside_roots(path: &Path, roots: &[PathBuf]) -> bool {
+    let Ok(canon) = fs::canonicalize(path) else {
+        return false;
+    };
+    roots.iter().any(|r| canon.starts_with(r))
+}
+
 fn should_skip_dir(name: &str) -> bool {
     matches!(name, ".git" | "target" | "node_modules" | ".gradle" | "build")
 }
@@ -557,12 +576,13 @@ fn run_device_probe(cfg: &AppConfig) -> Result<Value, String> {
 fn collect_entries(
     root: &Path,
     dir: &Path,
+    allowed_roots: &[PathBuf],
     depth: usize,
     max_depth: usize,
     ext_filter: Option<&str>,
     out: &mut Vec<Value>,
 ) -> Result<(), String> {
-    if out.len() >= 200 {
+    if out.len() >= 200 || !is_canonical_inside_roots(dir, allowed_roots) {
         return Ok(());
     }
     let mut entries: Vec<_> = fs::read_dir(dir)
@@ -577,6 +597,9 @@ fn collect_entries(
         }
         let name = entry.file_name().to_string_lossy().into_owned();
         let path = entry.path();
+        if !is_canonical_inside_roots(&path, allowed_roots) {
+            continue;
+        }
         let is_dir = path.is_dir();
         if is_dir && should_skip_dir(&name) {
             continue;
@@ -608,7 +631,7 @@ fn collect_entries(
             "size": size,
         }));
         if is_dir && depth < max_depth {
-            collect_entries(root, &path, depth + 1, max_depth, ext_filter, out)?;
+            collect_entries(root, &path, allowed_roots, depth + 1, max_depth, ext_filter, out)?;
         }
     }
     Ok(())
@@ -638,8 +661,9 @@ fn run_fs_list(args: &Value, cfg: &AppConfig) -> Result<Value, String> {
     if !dir.is_dir() {
         return Err(format!("not a directory: {raw_path}"));
     }
+    let roots = allowed_read_roots(cfg);
     let mut entries = Vec::new();
-    collect_entries(&cfg.workspace_root, &dir, 1, max_depth, ext, &mut entries)?;
+    collect_entries(&cfg.workspace_root, &dir, &roots, 1, max_depth, ext, &mut entries)?;
     Ok(json!({
         "root": cfg.workspace_root.display().to_string(),
         "count": entries.len(),
@@ -795,12 +819,13 @@ fn run_fs_edit(args: &Value, cfg: &AppConfig) -> Result<Value, String> {
 fn search_recursive(
     root: &Path,
     target: &Path,
+    allowed_roots: &[PathBuf],
     query: &str,
     case_sensitive: bool,
     max_results: usize,
     matches: &mut Vec<Value>,
 ) {
-    if matches.len() >= max_results {
+    if matches.len() >= max_results || !is_canonical_inside_roots(target, allowed_roots) {
         return;
     }
     if target.is_file() {
@@ -851,7 +876,7 @@ fn search_recursive(
             if p.is_dir() && should_skip_dir(&entry.file_name().to_string_lossy()) {
                 continue;
             }
-            search_recursive(root, &p, query, case_sensitive, max_results, matches);
+            search_recursive(root, &p, allowed_roots, query, case_sensitive, max_results, matches);
         }
     }
 }
@@ -874,10 +899,12 @@ fn run_fs_search(args: &Value, cfg: &AppConfig) -> Result<Value, String> {
         .clamp(1, 200) as usize;
 
     let target = resolve_workspace_path(cfg, raw_path, false)?;
+    let roots = allowed_read_roots(cfg);
     let mut matches = Vec::new();
     search_recursive(
         &cfg.workspace_root,
         &target,
+        &roots,
         query,
         case_sensitive,
         max_results,
@@ -1428,6 +1455,12 @@ fn run_shell_exec(args: &Value, cfg: &AppConfig) -> Result<Value, String> {
         .ok_or("missing non-empty 'command'")?;
     if command.len() > 4096 {
         return Err("command exceeds 4 KiB limit".into());
+    }
+    let lower = command.to_ascii_lowercase();
+    for pat in ["rm -rf /", "mkfs", "dd if=/dev/zero", ":(){ :|:& };:", "reboot", "shutdown"] {
+        if lower.contains(pat) {
+            return Err(format!("blocked dangerous shell command pattern: {pat}"));
+        }
     }
     let timeout_secs = args
         .get("timeout_secs")
