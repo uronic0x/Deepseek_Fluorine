@@ -37,6 +37,9 @@ object FluorineBridge {
         return dir
     }
 
+    /** 是否成功加载了 Rust 引擎（`libfluorine.so`）。 */
+    val isRustJniLoaded: Boolean get() = rustJniAvailable
+
     fun getWorkspaceDir(): File = defaultWorkspaceDir
 
     fun setAllowSdcardReadonly(allow: Boolean) {

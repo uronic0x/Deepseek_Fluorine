@@ -87,13 +87,15 @@ import java.io.File
 
 @Composable
 fun WelcomeSection(
+    mode: String = "chat",
     modifier: Modifier = Modifier
 ) {
+    val isWork = mode == "work"
     Column(
         modifier = modifier
             .fillMaxWidth()
             .padding(top = 64.dp, bottom = 36.dp, start = 12.dp, end = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         Text(
             text = stringResource(R.string.welcome_title),
@@ -101,9 +103,11 @@ fun WelcomeSection(
             color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.92f)
         )
         Text(
-            text = stringResource(R.string.welcome_desc),
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            text = stringResource(if (isWork) R.string.welcome_work_prompt else R.string.welcome_chat_prompt),
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.88f),
+            modifier = Modifier.padding(top = 2.dp)
         )
     }
 }
@@ -200,7 +204,15 @@ fun MessageItemCard(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(6.dp))
                                 .clickable {
-                                    clipboard.setText(AnnotatedString(message.text))
+                                    clipboard.setText(
+                                        AnnotatedString(
+                                            buildCitationCopyText(
+                                                text = message.text,
+                                                citations = message.citations,
+                                                sources = message.sources
+                                            )
+                                        )
+                                    )
                                     copied = true
                                     scope.launch {
                                         delay(1500)

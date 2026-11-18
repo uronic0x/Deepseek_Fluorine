@@ -17,13 +17,16 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -46,6 +49,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.ArrowUpward
@@ -61,7 +65,6 @@ import androidx.compose.material.icons.outlined.Language
 import androidx.compose.material.icons.outlined.LightMode
 import androidx.compose.material.icons.outlined.Menu
 import androidx.compose.material.icons.outlined.PhotoCamera
-import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.outlined.Stop
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.FilterChip
@@ -71,8 +74,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalNavigationDrawer
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -88,11 +89,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
@@ -538,7 +545,7 @@ fun FluorineWorkbenchApp(
                     ) {
                         if (uiState.chatMessages.isEmpty()) {
                             item(key = "welcome") {
-                                WelcomeSection()
+                                WelcomeSection(mode = uiState.mode)
                             }
                         }
 
@@ -931,158 +938,123 @@ private fun ComposerBottomBar(
             .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        // Unified Composer Card
+        // Unified Composer Card (UI001-inspired, reference layout)
         Surface(
             modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(24.dp),
+            shape = RoundedCornerShape(32.dp),
             color = MaterialTheme.colorScheme.surface,
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+            tonalElevation = 0.dp,
+            shadowElevation = 0.dp
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
+                    .padding(start = 12.dp, end = 12.dp, top = 16.dp, bottom = 6.dp)
             ) {
-                OutlinedTextField(
+                BasicTextField(
                     value = uiState.promptInput,
                     onValueChange = onUpdatePrompt,
-                    placeholder = {
-                        Text(
-                            text = stringResource(R.string.prompt_placeholder),
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f)
-                        )
-                    },
                     modifier = Modifier
                         .fillMaxWidth()
+                        .padding(horizontal = 6.dp)
                         .heightIn(min = 48.dp, max = 160.dp)
                         .testTag("prompt_input"),
                     textStyle = MaterialTheme.typography.bodyLarge.copy(
-                        color = MaterialTheme.colorScheme.onSurface
+                        color = MaterialTheme.colorScheme.onSurface,
+                        fontSize = 18.sp,
+                        lineHeight = 25.sp,
+                        fontWeight = FontWeight.Medium
                     ),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = Color.Transparent,
-                        unfocusedBorderColor = Color.Transparent,
-                        focusedContainerColor = Color.Transparent,
-                        unfocusedContainerColor = Color.Transparent
-                    )
+                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                    maxLines = 6,
+                    decorationBox = { innerTextField ->
+                        Box(Modifier.fillMaxWidth()) {
+                            if (uiState.promptInput.isEmpty()) {
+                                Text(
+                                    text = stringResource(R.string.prompt_placeholder),
+                                    style = MaterialTheme.typography.bodyLarge.copy(
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
+                                        fontSize = 18.sp,
+                                        lineHeight = 25.sp
+                                    )
+                                )
+                            }
+                            innerTextField()
+                        }
+                    }
                 )
 
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 2.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // Bottom-left Think & Search pills
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        ComposerPillToggle(
-                            icon = Icons.Outlined.Psychology,
-                            label = stringResource(R.string.toggle_thinking),
-                            active = uiState.useThinking && uiState.thinkingMode != "disabled",
-                            onClick = onToggleThinking,
-                            testTag = "thinking_toggle_button"
-                        )
-                        ComposerPillToggle(
-                            icon = Icons.Outlined.Language,
-                            label = stringResource(R.string.toggle_web),
-                            active = uiState.useWeb,
-                            onClick = onToggleWeb,
-                            testTag = "web_toggle_button"
-                        )
-                    }
-
-                    // Bottom-right circular (+) / (x) and Send (↑) / Stop (■) buttons (NO voice button)
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Surface(
-                            modifier = Modifier
-                                .size(38.dp)
-                                .clip(CircleShape)
-                                .clickable(onClick = onToggleAttachmentDrawer)
-                                .testTag("attach_toggle_button"),
-                            shape = CircleShape,
-                            color = if (showAttachmentDrawer) {
-                                MaterialTheme.colorScheme.surfaceVariant
-                            } else {
-                                Color.Transparent
-                            },
-                            border = BorderStroke(
-                                width = 1.4.dp,
-                                color = if (multimodalSupported) {
-                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f)
-                                } else {
-                                    MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)
-                                }
-                            )
+                BoxWithConstraints(Modifier.fillMaxWidth()) {
+                    val useTwoRows = maxWidth < 300.dp || LocalDensity.current.fontScale > 1.15f
+                    val toggles: @Composable () -> Unit = {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(
-                                    imageVector = if (showAttachmentDrawer) Icons.Outlined.Close else Icons.Outlined.Add,
-                                    contentDescription = if (showAttachmentDrawer) "收起附件面板" else "上传图片或文件",
-                                    modifier = Modifier.size(20.dp),
-                                    tint = if (multimodalSupported) {
-                                        MaterialTheme.colorScheme.onSurface
-                                    } else {
-                                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-                                    }
+                            ComposerPillToggle(
+                                icon = null,
+                                label = stringResource(R.string.toggle_thinking),
+                                active = uiState.useThinking && uiState.thinkingMode != "disabled",
+                                onClick = onToggleThinking,
+                                testTag = "thinking_toggle_button"
+                            )
+                            ComposerPillToggle(
+                                icon = Icons.Outlined.Language,
+                                label = stringResource(R.string.toggle_web),
+                                active = uiState.useWeb,
+                                onClick = onToggleWeb,
+                                testTag = "web_toggle_button"
+                            )
+                        }
+                    }
+                    val actions: @Composable () -> Unit = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            ComposerCircleButton(
+                                icon = if (showAttachmentDrawer) Icons.Outlined.Close else Icons.Outlined.Add,
+                                description = if (showAttachmentDrawer) "收起附件面板" else "上传图片或文件",
+                                enabled = multimodalSupported || showAttachmentDrawer,
+                                filled = false,
+                                onClick = onToggleAttachmentDrawer,
+                                testTag = "attach_toggle_button"
+                            )
+                            if (uiState.isBusy) {
+                                ComposerCircleButton(
+                                    icon = Icons.Outlined.Stop,
+                                    description = stringResource(R.string.stop_action),
+                                    enabled = true,
+                                    filled = true,
+                                    danger = true,
+                                    onClick = onStop,
+                                    testTag = "stop_button"
+                                )
+                            } else {
+                                ComposerCircleButton(
+                                    icon = Icons.Outlined.ArrowUpward,
+                                    description = stringResource(R.string.send_action),
+                                    enabled = canSend,
+                                    filled = true,
+                                    onClick = onSubmit,
+                                    testTag = "send_button"
                                 )
                             }
                         }
+                    }
 
-                        if (uiState.isBusy) {
-                            Surface(
-                                modifier = Modifier
-                                    .size(38.dp)
-                                    .clip(CircleShape)
-                                    .clickable(onClick = onStop)
-                                    .testTag("stop_button"),
-                                shape = CircleShape,
-                                color = MaterialTheme.colorScheme.error
-                            ) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    Icon(
-                                        imageVector = Icons.Outlined.Stop,
-                                        contentDescription = stringResource(R.string.stop_action),
-                                        modifier = Modifier.size(20.dp),
-                                        tint = MaterialTheme.colorScheme.onError
-                                    )
-                                }
-                            }
-                        } else {
-                            Surface(
-                                modifier = Modifier
-                                    .size(38.dp)
-                                    .clip(CircleShape)
-                                    .clickable(enabled = canSend, onClick = onSubmit)
-                                    .testTag("send_button"),
-                                shape = CircleShape,
-                                color = if (canSend) {
-                                    MaterialTheme.colorScheme.primary
-                                } else {
-                                    MaterialTheme.colorScheme.surfaceVariant
-                                }
-                            ) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    Icon(
-                                        imageVector = Icons.Outlined.ArrowUpward,
-                                        contentDescription = stringResource(R.string.send_action),
-                                        modifier = Modifier.size(20.dp),
-                                        tint = if (canSend) {
-                                            MaterialTheme.colorScheme.onPrimary
-                                        } else {
-                                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
-                                        }
-                                    )
-                                }
-                            }
+                    if (useTwoRows) {
+                        Column(Modifier.fillMaxWidth()) {
+                            toggles()
+                            Spacer(Modifier.height(8.dp))
+                            Box(Modifier.align(Alignment.End)) { actions() }
+                        }
+                    } else {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            toggles()
+                            Spacer(Modifier.weight(1f).width(8.dp))
+                            actions()
                         }
                     }
                 }
@@ -1345,7 +1317,7 @@ private fun AttachmentSourceCard(
 
 @Composable
 private fun ComposerPillToggle(
-    icon: ImageVector,
+    icon: ImageVector?,
     label: String,
     active: Boolean,
     onClick: () -> Unit,
@@ -1366,32 +1338,122 @@ private fun ComposerPillToggle(
     } else {
         MaterialTheme.colorScheme.outlineVariant
     }
+    val accent = MaterialTheme.colorScheme.primary
 
-    Surface(
+    // 48dp 点击热区，内部可见药丸 36dp
+    Box(
         modifier = Modifier
-            .clip(RoundedCornerShape(20.dp))
+            .heightIn(min = 48.dp)
+            .clip(RoundedCornerShape(24.dp))
             .clickable(onClick = onClick)
             .testTag(testTag),
-        shape = RoundedCornerShape(20.dp),
-        color = bg,
-        border = BorderStroke(1.dp, border)
+        contentAlignment = Alignment.Center
     ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 13.dp, vertical = 7.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        Surface(
+            modifier = Modifier.heightIn(min = 36.dp),
+            shape = RoundedCornerShape(24.dp),
+            color = bg,
+            border = BorderStroke(1.dp, border)
         ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                modifier = Modifier.size(16.dp),
-                tint = fg
-            )
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelLarge,
-                color = fg
-            )
+            Row(
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp)
+            ) {
+                if (icon == null) {
+                    ThinkGlyph(tint = fg, accent = accent)
+                } else {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        tint = fg
+                    )
+                }
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.labelLarge.copy(
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold
+                    ),
+                    color = fg,
+                    maxLines = 1
+                )
+            }
         }
+    }
+}
+
+/** 圆形操作按钮：描边款（filled=false）或实心款（filled=true，发送/停止）。 */
+@Composable
+private fun ComposerCircleButton(
+    icon: ImageVector,
+    description: String,
+    enabled: Boolean,
+    filled: Boolean,
+    onClick: () -> Unit,
+    testTag: String,
+    danger: Boolean = false
+) {
+    val tint = when {
+        danger -> MaterialTheme.colorScheme.error
+        enabled -> MaterialTheme.colorScheme.onSurface
+        else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
+    }
+    IconButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier
+            .size(48.dp)
+            .testTag(testTag)
+    ) {
+        if (filled) {
+            val fill = when {
+                danger -> MaterialTheme.colorScheme.error
+                enabled -> MaterialTheme.colorScheme.primary
+                else -> MaterialTheme.colorScheme.surfaceVariant
+            }
+            val fgColor = when {
+                danger -> MaterialTheme.colorScheme.onError
+                enabled -> MaterialTheme.colorScheme.onPrimary
+                else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
+            }
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    .background(fill, CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(icon, description, Modifier.size(22.dp), fgColor)
+            }
+        } else {
+            Box(
+                modifier = Modifier
+                    .size(30.dp)
+                    .border(1.6.dp, tint, CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(icon, description, Modifier.size(18.dp), tint)
+            }
+        }
+    }
+}
+
+/** 原子形状的 Think 图标（三个椭圆轨道 + 原子核），比 Psychology 更贴近参照图。 */
+@Composable
+private fun ThinkGlyph(tint: Color, accent: Color) {
+    Canvas(Modifier.size(18.dp)) {
+        val line = Stroke(width = 1.4.dp.toPx())
+        for (angle in listOf(0f, 60f, 120f)) {
+            rotate(angle) {
+                drawOval(
+                    color = tint,
+                    topLeft = Offset(size.width * 0.08f, size.height * 0.32f),
+                    size = Size(size.width * 0.84f, size.height * 0.36f),
+                    style = line
+                )
+            }
+        }
+        drawCircle(color = tint, radius = size.minDimension * 0.075f)
     }
 }

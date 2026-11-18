@@ -61,6 +61,7 @@ import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.uronic0x.fluorine.protocol.CitationPoint
+import com.uronic0x.fluorine.protocol.SearchSource
 import com.uronic0x.fluorine.ui.theme.MonoFontFamily
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -149,6 +150,83 @@ internal fun injectInlineCitations(text: String, citations: List<CitationPoint>)
         sb.insert(charPos.coerceIn(0, sb.length), badge)
     }
     return sb.toString()
+}
+
+/**
+ * 生成「复制用」纯文本：正文在 citation 偏移处插入 `[n]` 角标，
+ * 文末追加引用列表（编号 + 标题 + URL），与设备渲染角标语义一致。
+ */
+internal fun buildCitationCopyText(
+    text: String,
+    citations: List<CitationPoint>,
+    sources: List<SearchSource> = emptyList()
+): String {
+    if (text.isEmpty()) return text
+
+    val withBadges = if (citations.isEmpty()) {
+        text
+    } else {
+        val totalCodePoints = text.codePointCount(0, text.length)
+        val mapped = citations.mapNotNull { pt ->
+            if (pt.indexes.isEmpty()) return@mapNotNull null
+            val charOffset = if (pt.endIndex >= 0) {
+                val cp = pt.endIndex.coerceIn(0, totalCodePoints)
+                text.offsetByCodePoints(0, cp)
+            } else {
+                pt.offset.coerceIn(0, text.length)
+            }
+            Triple(charOffset, pt.indexes, pt)
+        }.sortedByDescending { it.first }
+        if (mapped.isEmpty()) {
+            text
+        } else {
+            val sb = StringBuilder(text)
+            for ((charPos, indexes, _) in mapped) {
+                val badge = indexes.joinToString("") { "[$it]" }
+                sb.insert(charPos.coerceIn(0, sb.length), badge)
+            }
+            sb.toString()
+        }
+    }
+
+    if (sources.isEmpty()) return withBadges
+
+    // 用 citations 的 url/title 优先建立编号 -> 引用条目映射，
+    // 缺号时回退 sources 列表（位置下标即 UI 展示编号）。
+    val indexToRef = linkedMapOf<Int, Pair<String, String>>()
+    for (c in citations) {
+        for (idx in c.indexes) {
+            if (idx > 0 && !indexToRef.containsKey(idx)) {
+                indexToRef[idx] = (c.title.ifBlank { c.url }) to c.url
+            }
+        }
+    }
+    val sourceRefs = mutableListOf<Pair<String, String>>()
+    if (indexToRef.isEmpty()) {
+        sources.forEachIndexed { i, s ->
+            sourceRefs.add((s.title.ifBlank { s.url }) to s.url)
+        }
+    } else {
+        val maxIdx = indexToRef.keys.maxOrNull() ?: 0
+        for (i in 1..maxIdx) {
+            val ref = indexToRef[i]
+            if (ref != null && ref.second.isNotBlank()) {
+                sourceRefs.add(ref)
+            }
+        }
+    }
+
+    if (sourceRefs.isEmpty()) return withBadges
+
+    return buildString {
+        append(withBadges)
+        append("\n\n---\n")
+        append("引用来源：\n")
+        sourceRefs.forEachIndexed { i, (title, url) ->
+            append("[${i + 1}] ${title.ifBlank { url }}\n")
+            if (url.isNotBlank()) append("    $url\n")
+        }
+    }.trimEnd()
 }
 
 sealed interface MdBlock {
@@ -960,6 +1038,9 @@ private fun InlineMarkdownText(
     }
 }
 
+/** 匹配引用角标标签：单个 `[1]` 或连续多个 `[1][2]`。 */
+private val CitationLabelRegex = Regex("""^(?:\[\d{1,3}])+$""")
+
 private fun buildInlineAnnotatedString(
     text: String,
     primaryColor: Color,
@@ -1044,23 +1125,53 @@ private fun buildInlineAnnotatedString(
             }
         }
 
-        // 6. Markdown link [label](url)
+        // 6. Markdown link [label](url)（支持嵌套方括号标签，如引用角标 [[1]](url)）
         if (text[i] == '[') {
-            val closeBracket = text.indexOf(']', i + 1)
-            if (closeBracket > i + 1 && closeBracket + 1 < text.length && text[closeBracket + 1] == '(') {
-                val closeParen = text.indexOf(')', closeBracket + 2)
-                if (closeParen > closeBracket + 2) {
-                    val label = text.substring(i + 1, closeBracket)
-                    val url = text.substring(closeBracket + 2, closeParen).trim()
+            // 扫描匹配的外层 ']'（depth 计数兼顾内层 [n]）
+            var depth = 0
+            var matchClose = -1
+            var k = i
+            while (k < text.length) {
+                val ch = text[k]
+                if (ch == '[') {
+                    depth++
+                } else if (ch == ']') {
+                    depth--
+                    if (depth == 0) {
+                        matchClose = k
+                        break
+                    }
+                }
+                k++
+            }
+            if (matchClose > i + 1 && matchClose + 1 < text.length && text[matchClose + 1] == '(') {
+                val closeParen = text.indexOf(')', matchClose + 2)
+                if (closeParen > matchClose + 2) {
+                    val label = text.substring(i + 1, matchClose)
+                    val url = text.substring(matchClose + 2, closeParen).trim()
                     pushStringAnnotation(tag = "URL", annotation = url)
-                    withStyle(
-                        SpanStyle(
-                            color = primaryColor,
-                            textDecoration = TextDecoration.Underline,
-                            fontWeight = FontWeight.Medium
-                        )
-                    ) {
-                        append(label)
+                    if (CitationLabelRegex.matches(label)) {
+                        // 引用角标标签（[1] / [1][2] ...）：渲染为上标角标
+                        withStyle(
+                            SpanStyle(
+                                color = primaryColor,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                baselineShift = BaselineShift.Superscript
+                            )
+                        ) {
+                            append(label)
+                        }
+                    } else {
+                        withStyle(
+                            SpanStyle(
+                                color = primaryColor,
+                                textDecoration = TextDecoration.Underline,
+                                fontWeight = FontWeight.Medium
+                            )
+                        ) {
+                            append(label)
+                        }
                     }
                     pop()
                     i = closeParen + 1
@@ -1068,9 +1179,9 @@ private fun buildInlineAnnotatedString(
                 }
             }
 
-            // Citation badge [1] or [12]
-            if (closeBracket in (i + 2)..(i + 4)) {
-                val inside = text.substring(i + 1, closeBracket)
+            // Citation badge [1] or [12]（无链接的纯角标）
+            if (matchClose in (i + 2)..(i + 4)) {
+                val inside = text.substring(i + 1, matchClose)
                 if (inside.all { it.isDigit() }) {
                     withStyle(
                         SpanStyle(
@@ -1082,7 +1193,7 @@ private fun buildInlineAnnotatedString(
                     ) {
                         append("[$inside]")
                     }
-                    i = closeBracket + 1
+                    i = matchClose + 1
                     continue
                 }
             }

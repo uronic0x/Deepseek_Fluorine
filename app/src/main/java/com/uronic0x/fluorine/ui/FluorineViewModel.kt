@@ -106,7 +106,8 @@ data class FluorineUiState(
     val renamingSession: ConversationSession? = null,
     val isDiscovering: Boolean = false,
     val discoverySummary: String = "",
-    val engineInfo: String = ""
+    val engineInfo: String = "",
+    val engineLabel: String = ""
 )
 
 class FluorineViewModel(application: Application) : AndroidViewModel(application) {
@@ -185,9 +186,30 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
 
         FluorineBridge.setAllowSdcardReadonly(savedSdcard)
         val infoRaw = FluorineBridge.engineInfoJson()
+        val engineLabel = buildEngineLabel(infoRaw)
 
         val (loadedSessions, activeId) = loadSessionsFromDisk()
-        val activeSession = loadedSessions.firstOrNull { it.id == activeId } ?: loadedSessions.first()
+        // 启动时总是进入一个空白新对话：
+        // - 若上次激活的会话本身就是空白会话，直接复用，避免堆积空白会话；
+        // - 否则在列表最前面新建一个空白会话作为启动会话（保留历史会话列表）。
+        val lastActive = loadedSessions.firstOrNull { it.id == activeId } ?: loadedSessions.first()
+        val startupMode = prefs.getString("mode", "chat") ?: "chat"
+        val (startupSessions, startupSession) = if (lastActive.chatMessages.isEmpty()) {
+            loadedSessions to lastActive
+        } else {
+            val blank = ConversationSession(
+                id = UUID.randomUUID().toString(),
+                title = if (startupMode == "work") "新 Work 任务" else "新对话",
+                mode = startupMode,
+                createdAt = System.currentTimeMillis(),
+                updatedAt = System.currentTimeMillis(),
+                chatMessages = emptyList(),
+                contextHistory = emptyList()
+            )
+            val list = listOf(blank) + loadedSessions
+            persistSessionsToDisk(list, blank.id)
+            list to blank
+        }
 
         val effectiveModel = customModel.ifBlank { savedModel }
         val effectiveWeb = if (effectiveModel == "deepseek-v4-pro" && !unlockWebSearch) false else savedWeb
@@ -195,12 +217,12 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
 
         _uiState.update {
             it.copy(
-                sessions = loadedSessions,
-                activeSessionId = activeSession.id,
-                conversationTitle = activeSession.title,
-                mode = activeSession.mode,
-                chatMessages = activeSession.chatMessages,
-                contextHistory = activeSession.contextHistory,
+                sessions = startupSessions,
+                activeSessionId = startupSession.id,
+                conversationTitle = startupSession.title,
+                mode = startupSession.mode,
+                chatMessages = startupSession.chatMessages,
+                contextHistory = startupSession.contextHistory,
                 themeMode = savedTheme,
                 enableMarkdown = enableMarkdown,
                 enableLatex = enableLatex,
@@ -233,9 +255,31 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
                 shellTimeoutSec = shellTimeoutSec,
                 workspacePath = workspaceDir.absolutePath,
                 workspaceFiles = wsFiles,
-                engineInfo = infoRaw
+                engineInfo = infoRaw,
+                engineLabel = engineLabel
             )
         }
+    }
+
+    /**
+     * 把引擎 meta JSON 折叠成一行简洁标签，用于设置页标题下的副标题展示，
+     * 避免把整段 JSON（runtime/available_bins/workspace…）直接铺在界面上。
+     */
+    private fun buildEngineLabel(infoRaw: String): String {
+        val obj = runCatching { JSONObject(infoRaw) }.getOrNull()
+            ?: return "Fluorine · ${if (FluorineBridge.isRustJniLoaded) "Rust JNI" else "Kotlin 回退"}"
+        val display = obj.optString("display_name", "").ifBlank { obj.optString("app_name", "Fluorine") }
+        val version = obj.optString("version", "")
+        val subtitle = obj.optString("subtitle", "")
+        val runtime = obj.optJSONObject("runtime")
+        val arch = runtime?.optString("arch", "").orEmpty()
+        val engineKind = if (FluorineBridge.isRustJniLoaded) "Rust JNI" else "Kotlin 回退"
+
+        return buildList {
+            add(display + if (version.isNotBlank()) " v$version" else "")
+            if (subtitle.isNotBlank()) add(subtitle)
+            add(engineKind + if (arch.isNotBlank()) " · $arch" else "")
+        }.joinToString(" · ")
     }
 
     private fun loadSessionsFromDisk(): Pair<List<ConversationSession>, String> {

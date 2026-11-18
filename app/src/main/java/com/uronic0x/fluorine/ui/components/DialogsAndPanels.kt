@@ -1084,9 +1084,11 @@ fun SettingsDialog(
                             style = MaterialTheme.typography.titleLarge
                         )
                         Text(
-                            text = uiState.engineInfo,
+                            text = uiState.engineLabel.ifBlank { "Fluorine" },
                             style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                     IconButton(onClick = onDismiss) {

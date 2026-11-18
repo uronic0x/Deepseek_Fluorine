@@ -21,7 +21,11 @@
     <!-- Welcome -->
     <string name="welcome_eyebrow">Fluorine</string>
     <string name="welcome_title">Fluorine</string>
-    <string name="welcome_desc">DeepSeek 2026-11 工作台 · Chat 与 Work 会话隔离</string>
+    <string name="welcome_desc">A local-first DeepSeek workspace</string>
+    <string name="welcome_chat_prompt">What would you like to talk about?</string>
+    <string name="welcome_chat_hint">Type a message to start.</string>
+    <string name="welcome_work_prompt">Give me a task</string>
+    <string name="welcome_work_hint">Describe your goal and let me handle the rest.</string>
 
     <!-- Composer -->
     <string name="prompt_placeholder">输入问题或任务…</string>
