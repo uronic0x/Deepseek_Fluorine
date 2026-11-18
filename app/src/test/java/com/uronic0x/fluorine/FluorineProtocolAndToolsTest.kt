@@ -3,14 +3,18 @@ package com.uronic0x.fluorine
 import com.uronic0x.fluorine.engine.AndroidHarnessTools
 import com.uronic0x.fluorine.engine.DeterministicTools
 import com.uronic0x.fluorine.engine.KotlinNativeEngine
+import com.uronic0x.fluorine.protocol.ChatAttachment
 import com.uronic0x.fluorine.protocol.ChatMessage
+import com.uronic0x.fluorine.protocol.CitationPoint
 import com.uronic0x.fluorine.protocol.ContextTurn
 import com.uronic0x.fluorine.protocol.ConversationSession
 import com.uronic0x.fluorine.protocol.CoreProtocol
 import com.uronic0x.fluorine.protocol.LocalToolCallRecord
+import com.uronic0x.fluorine.protocol.WorkToolsConfig
 import com.uronic0x.fluorine.ui.components.LatexMathParser
 import com.uronic0x.fluorine.ui.components.MathNode
 import com.uronic0x.fluorine.ui.components.MdBlock
+import com.uronic0x.fluorine.ui.components.injectInlineCitations
 import com.uronic0x.fluorine.ui.components.parseMarkdownBlocks
 import org.json.JSONArray
 import org.json.JSONObject
@@ -25,13 +29,13 @@ import java.nio.file.Files
 class FluorineProtocolAndToolsTest {
 
     @Test
-    fun proOmitsWebSearchWhileFlashIncludesItByDefault() {
+    fun proOmitsWebSearchAndUsesTopLevelReasoningEffort() {
         val proReq = JSONObject()
             .put("model", "deepseek-v4-pro")
             .put("stage", "chat")
             .put("use_web", true)
             .put("use_thinking", true)
-            .put("effort", "high")
+            .put("effort", "medium")
             .put("max_tokens", 8192)
             .put(
                 "messages",
@@ -39,14 +43,15 @@ class FluorineProtocolAndToolsTest {
                     JSONObject()
                         .put("role", "user")
                         .put("content", "Hello")
-                        .put("reasoning_content", "must be stripped")
+                        .put("reasoning_content", "must be stripped on user")
                 )
             )
 
         val proPayload = KotlinNativeEngine.buildUpstreamPayload(proReq)
         assertFalse(proPayload.has("tools"))
+        assertFalse(proPayload.has("reasoning"))
         assertEquals("enabled", proPayload.getJSONObject("thinking").getString("type"))
-        assertEquals("high", proPayload.getJSONObject("reasoning").getString("effort"))
+        assertEquals("high", proPayload.getString("reasoning_effort"))
         assertFalse(
             proPayload.getJSONArray("messages")
                 .getJSONObject(1)
@@ -56,14 +61,14 @@ class FluorineProtocolAndToolsTest {
         val flashReq = JSONObject(proReq.toString()).put("model", "deepseek-flash")
         val flashPayload = KotlinNativeEngine.buildUpstreamPayload(flashReq)
         assertTrue(flashPayload.has("tools"))
-        assertEquals(
-            "deepseek_web_search",
-            flashPayload.getJSONArray("tools").getJSONObject(0).getString("type")
-        )
+        val tools = flashPayload.getJSONArray("tools")
+        assertEquals(2, tools.length())
+        assertEquals("deepseek_web_search", tools.getJSONObject(0).getString("type"))
+        assertEquals("deepseek_read_url", tools.getJSONObject(1).getString("type"))
     }
 
     @Test
-    fun autonomousWorkModePreservesToolHistoryWithoutReasoningForPrefixCacheHit() {
+    fun workModeNeverMixesBuiltInSearchWithFunctionToolsAndRetainsReasoningWhenToolsPresent() {
         val toolCallArr = JSONArray().put(
             JSONObject()
                 .put("id", "call_1")
@@ -81,7 +86,18 @@ class FluorineProtocolAndToolsTest {
             .put("use_web", true)
             .put("use_thinking", true)
             .put("use_local_tools", true)
-            .put("effort", "medium")
+            .put("effort", "max")
+            .put(
+                "tool_config",
+                WorkToolsConfig(
+                    deterministic = true,
+                    workspaceRead = true,
+                    workspaceWrite = true,
+                    git = true,
+                    shellExec = true,
+                    deviceControl = true
+                ).toJson()
+            )
             .put(
                 "messages",
                 JSONArray()
@@ -90,7 +106,7 @@ class FluorineProtocolAndToolsTest {
                         JSONObject()
                             .put("role", "assistant")
                             .put("content", "")
-                            .put("reasoning_content", "strip historical reasoning")
+                            .put("reasoning_content", "step-by-step reasoning")
                             .put("tool_calls", toolCallArr)
                     )
                     .put(
@@ -99,23 +115,98 @@ class FluorineProtocolAndToolsTest {
                             .put("tool_call_id", "call_1")
                             .put("content", """{"ok":true,"result":1024}""")
                     )
-                    .put(JSONObject().put("role", "assistant").put("content", "2^10 = 1024"))
+                    .put(
+                        JSONObject()
+                            .put("role", "assistant")
+                            .put("content", "2^10 = 1024")
+                            .put("reasoning_content", "final turn reasoning")
+                    )
                     .put(JSONObject().put("role", "user").put("content", "Now add 24"))
             )
 
         val payload = KotlinNativeEngine.buildUpstreamPayload(workReq)
         val tools = payload.getJSONArray("tools")
-        // 1 deepseek_web_search + 9 deterministic + 9 harness = 19 tools
-        assertEquals(19, tools.length())
+        // 2 function web tools (web_search + web_fetch) + 9 deterministic + 9 harness = 20
+        assertEquals(20, tools.length())
+        for (i in 0 until tools.length()) {
+            val type = tools.getJSONObject(i).getString("type")
+            assertEquals("function", type)
+            assertFalse(type == "deepseek_web_search" || type == "deepseek_read_url")
+        }
 
         val msgs = payload.getJSONArray("messages")
-        // system + user1 + assistant(tool_calls) + tool + assistant1 + user2 = 6 messages
         assertEquals(6, msgs.length())
         assertEquals("system", msgs.getJSONObject(0).getString("role"))
         assertTrue(msgs.getJSONObject(2).has("tool_calls"))
-        assertFalse(msgs.getJSONObject(2).has("reasoning_content"))
-        assertEquals("tool", msgs.getJSONObject(3).getString("role"))
-        assertEquals("call_1", msgs.getJSONObject(3).getString("tool_call_id"))
+        assertEquals("step-by-step reasoning", msgs.getJSONObject(2).getString("reasoning_content"))
+        assertEquals("final turn reasoning", msgs.getJSONObject(4).getString("reasoning_content"))
+    }
+
+    @Test
+    fun workToolsConfigCustomizesDeclarationsAndEnforcesExecutionAllowlist() {
+        val cfg = WorkToolsConfig(
+            deterministic = true,
+            workspaceRead = true,
+            workspaceWrite = false,
+            git = false,
+            shellExec = true,
+            deviceControl = false,
+            disabledTools = setOf("stats_summary")
+        )
+        val enabled = cfg.enabledToolNames()
+        assertTrue("calc" in enabled)
+        assertTrue(cfg.isToolEnabled("calc_eval"))
+        assertTrue("shell_exec" in enabled)
+        assertTrue("fs_read" in enabled)
+        assertFalse("stats" in enabled)
+        assertFalse(cfg.isToolEnabled("stats_summary"))
+        assertFalse("fs_write" in enabled)
+        assertFalse("git_cmd" in enabled)
+        assertFalse("termux_api" in enabled)
+        assertFalse("self_adb" in enabled)
+
+        val tempWs: File = Files.createTempDirectory("fluorine_allowlist_test").toFile()
+        try {
+            val blockedWrite = KotlinNativeEngine.executeLocalTool(
+                name = "fs_write",
+                rawArguments = """{"path":"x.txt","content":"nope"}""",
+                workspaceRoot = tempWs,
+                allowSdcardReadonly = false,
+                enabledTools = enabled
+            )
+            assertFalse(blockedWrite.getBoolean("ok"))
+
+            val blockedStats = KotlinNativeEngine.executeLocalTool(
+                name = "stats_summary",
+                rawArguments = """{"values":[1,2,3]}""",
+                workspaceRoot = tempWs,
+                allowSdcardReadonly = false,
+                enabledTools = enabled
+            )
+            assertFalse(blockedStats.getBoolean("ok"))
+
+            val allowedShell = KotlinNativeEngine.executeLocalTool(
+                name = "shell_exec",
+                rawArguments = """{"command":"echo ok_shell"}""",
+                workspaceRoot = tempWs,
+                allowSdcardReadonly = false,
+                enabledTools = enabled
+            )
+            assertTrue(allowedShell.getBoolean("ok"))
+            assertTrue(allowedShell.getString("output").contains("ok_shell"))
+
+            // When device_control is enabled, termux_api runs and truthfully reports ok=false if binary is missing
+            val termuxUnavailable = AndroidHarnessTools.execute(
+                name = "termux_api",
+                args = JSONObject().put("api", "battery-status"),
+                workspaceRoot = tempWs,
+                allowSdcardReadonly = false,
+                enabledTools = setOf("termux_api")
+            )
+            assertFalse(termuxUnavailable.getBoolean("ok"))
+        } finally {
+            tempWs.deleteRecursively()
+        }
     }
 
     @Test
@@ -192,9 +283,87 @@ class FluorineProtocolAndToolsTest {
                 allowSdcardReadonly = false
             )
             assertFalse(traversalRes.getBoolean("ok"))
+
+            // Append limit check (512 KiB max)
+            val hugeChunk = "a".repeat(300 * 1024)
+            assertTrue(
+                AndroidHarnessTools.execute(
+                    "fs_write",
+                    JSONObject().put("path", "big.txt").put("content", hugeChunk),
+                    tempWs,
+                    allowSdcardReadonly = false
+                ).getBoolean("ok")
+            )
+            val appendOverflow = AndroidHarnessTools.execute(
+                "fs_write",
+                JSONObject().put("path", "big.txt").put("content", hugeChunk).put("append", true),
+                tempWs,
+                allowSdcardReadonly = false
+            )
+            assertFalse(appendOverflow.getBoolean("ok"))
         } finally {
             tempWs.deleteRecursively()
         }
+    }
+
+    @Test
+    fun parseEngineTurnResultPreservesPartialOutputOnContentFilterAndAbort() {
+        val raw = JSONObject()
+            .put("ok", false)
+            .put("error", "Upstream terminated with content_filter")
+            .put("finish_reason", "content_filter")
+            .put("incomplete_notice", "生成因触发内容安全审核被提前终止（已完整保留已输出的思考与正文）")
+            .put("thinking", "已输出思考过程")
+            .put("content", "已流出的半截回答内容")
+            .put("sources", JSONArray())
+            .put("local_tool_calls", JSONArray())
+            .put("usage", JSONObject().put("prompt_tokens", 10).put("completion_tokens", 20))
+            .toString()
+
+        val parsed = CoreProtocol.parseEngineTurnResult(raw)
+        assertFalse(parsed.ok)
+        assertEquals("content_filter", parsed.finishReason)
+        assertEquals("已输出思考过程", parsed.thinking)
+        assertEquals("已流出的半截回答内容", parsed.content)
+        assertTrue(parsed.incompleteNotice.contains("内容安全审核"))
+        assertTrue(parsed.usageText.contains("输入 10"))
+    }
+
+    @Test
+    fun multimodalCapabilitiesAndAttachmentPayloadBlocksWork() {
+        assertTrue(CoreProtocol.supportsMultimodal("deepseek-flash", CoreProtocol.DEFAULT_MODEL_CAPABILITIES))
+        assertFalse(CoreProtocol.supportsMultimodal("deepseek-v4-pro", CoreProtocol.DEFAULT_MODEL_CAPABILITIES))
+
+        val req = JSONObject()
+            .put("model", "deepseek-flash")
+            .put("stage", "chat")
+            .put(
+                "messages",
+                JSONArray().put(
+                    JSONObject()
+                        .put("role", "user")
+                        .put("content", "请总结附件文档")
+                        .put(
+                            "attachments",
+                            JSONArray().put(
+                                JSONObject()
+                                    .put("kind", "document")
+                                    .put("name", "spec.pdf")
+                                    .put("mime_type", "application/pdf")
+                                    .put("file_id", "file-abc-123")
+                            )
+                        )
+                )
+            )
+
+        val payload = KotlinNativeEngine.buildUpstreamPayload(req)
+        val userMsg = payload.getJSONArray("messages").getJSONObject(1)
+        val blocks = userMsg.getJSONArray("content")
+        assertEquals(2, blocks.length())
+        assertEquals("file", blocks.getJSONObject(0).getString("type"))
+        assertEquals("file-abc-123", blocks.getJSONObject(0).getString("file_id"))
+        assertEquals("text", blocks.getJSONObject(1).getString("type"))
+        assertEquals("请总结附件文档", blocks.getJSONObject(1).getString("text"))
     }
 
     @Test
@@ -221,14 +390,24 @@ class FluorineProtocolAndToolsTest {
         assertEquals("summary.md", artifacts[0].fileName)
         assertEquals(128L, artifacts[0].bytes)
 
+        val attachment = ChatAttachment(
+            id = "att1",
+            name = "photo.jpg",
+            mimeType = "image/jpeg",
+            kind = "image",
+            localPath = "/tmp/photo.jpg",
+            sizeBytes = 1024L
+        )
         val session1 = ConversationSession(
             id = "s1",
             title = "公式推导",
             mode = "chat",
             createdAt = 1000L,
             updatedAt = 2000L,
-            chatMessages = listOf(ChatMessage(id = "m1", role = "user", text = "推导高斯积分")),
-            contextHistory = listOf(ContextTurn("user", "推导高斯积分"))
+            chatMessages = listOf(
+                ChatMessage(id = "m1", role = "user", text = "推导高斯积分", attachments = listOf(attachment))
+            ),
+            contextHistory = listOf(ContextTurn("user", "推导高斯积分", attachments = listOf(attachment)))
         )
         val session2 = ConversationSession(
             id = "s2",
@@ -241,14 +420,16 @@ class FluorineProtocolAndToolsTest {
                     id = "m2",
                     role = "assistant",
                     text = "已生成报告",
-                    localToolCalls = toolCalls
+                    localToolCalls = toolCalls,
+                    incompleteNotice = "已截断"
                 )
             ),
             contextHistory = listOf(
                 ContextTurn(
                     role = "assistant",
                     content = "已生成报告",
-                    subturnMessages = listOf("""{"role":"tool","tool_call_id":"c1","content":"{}"}""")
+                    subturnMessages = listOf("""{"role":"tool","tool_call_id":"c1","content":"{}"}"""),
+                    reasoningContent = "思考内容"
                 )
             )
         )
@@ -257,13 +438,30 @@ class FluorineProtocolAndToolsTest {
         val (restored, activeId) = CoreProtocol.deserializeSessionsStore(json)
         assertEquals("s2", activeId)
         assertEquals(2, restored.size)
+        assertEquals(1, restored[0].chatMessages[0].attachments.size)
         assertEquals("生成报告", restored[1].title)
         assertEquals(2, restored[1].chatMessages[0].localToolCalls.size)
-        assertEquals(1, restored[1].contextHistory[0].subturnMessages.size)
+        assertEquals("已截断", restored[1].chatMessages[0].incompleteNotice)
+        assertEquals("思考内容", restored[1].contextHistory[0].reasoningContent)
     }
 
     @Test
-    fun markdownAndLatexMathParsersHandleBlocksAndFormulas() {
+    fun markdownLatexAndCodePointCitationInjectionWork() {
+        val sample = "😀测试引用句" // emoji is 2 UTF-16 code units, 1 Unicode code point!
+        val cited = injectInlineCitations(
+            sample,
+            listOf(
+                CitationPoint(
+                    offset = 5,
+                    indexes = listOf(1),
+                    startIndex = 0,
+                    endIndex = 5,
+                    url = "https://example.com"
+                )
+            )
+        )
+        assertEquals("😀测试引用[[1]](https://example.com)句", cited)
+
         val md = """
             # 标题一
             这是段落，包含行内公式 $\frac{a+b}{c}$ 与 **加粗**。

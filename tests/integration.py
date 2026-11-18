@@ -261,7 +261,7 @@ class Integration(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertIn("计算结果为 20", body)
-        self.assertIn('"value":20', body)
+        self.assertTrue('"value":20' in body or '\\"value\\":20' in body)
         # Verify reasoning_content was preserved in round 2 upstream request
         last_req = SEEN[-1]
         assistant_msg = [m for m in last_req["messages"] if m["role"] == "assistant"][-1]

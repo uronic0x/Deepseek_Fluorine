@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   accumulator,
   buildLatestReminder,
+  buildUserContentBlocks,
   citationPoints,
   estimateCostUsd,
   formatServerToolEvent,
@@ -10,6 +11,7 @@ import {
   sanitizeHistoryMessage,
   slugifyAppName,
   sourceList,
+  supportsMultimodal,
 } from '../web/core.js';
 
 test('safeUrl blocks javascript and credential URLs', () => {
@@ -41,9 +43,9 @@ test('sanitizeHistoryMessage strips response-only metadata and conditional serve
   const stripped = sanitizeHistoryMessage(msg, { keepServerToolCalls: false });
   assert.deepEqual(stripped, { role: 'assistant', content: 'answer' });
 
-  const keptWeb = sanitizeHistoryMessage(msg, { keepServerToolCalls: true });
+  const keptWeb = sanitizeHistoryMessage(msg, { keepServerToolCalls: true, keepReasoningContent: true });
   assert.equal(keptWeb.server_tool_calls.length, 1);
-  assert.equal(keptWeb.reasoning_content, undefined);
+  assert.equal(keptWeb.reasoning_content, 'hidden cot');
   assert.equal(keptWeb.annotations, undefined);
 });
 
@@ -121,13 +123,48 @@ test('accumulator handles local_tool_calls and title', () => {
   assert.equal(res.message.content, '结果是 14');
 });
 
-test('accumulator surfaces insufficient_system_resource clearly', () => {
+test('accumulator surfaces insufficient_system_resource clearly and keeps partial content', () => {
   const acc = accumulator();
   acc.push({
     choices: [{ delta: { content: 'partial' }, finish_reason: 'insufficient_system_resource' }],
   });
   acc.markDone();
-  assert.throws(() => acc.result(), /推理资源暂时不足/);
+  assert.throws(() => acc.result(), err => {
+    assert.match(err.message, /推理资源暂时不足/);
+    assert.equal(err.partial.content, 'partial');
+    return true;
+  });
+});
+
+test('accumulator preserves streamed content on content_filter', () => {
+  const acc = accumulator();
+  acc.push({
+    choices: [{ delta: { reasoning_content: 'think', content: '已流出的正文' }, finish_reason: 'content_filter' }],
+  });
+  acc.markDone();
+  assert.throws(() => acc.result(), err => {
+    assert.equal(err.code, 'content_filter');
+    assert.equal(err.partial.content, '已流出的正文');
+    assert.equal(err.partial.reasoning_content, 'think');
+    return true;
+  });
+});
+
+test('supportsMultimodal and buildUserContentBlocks match model modalities', () => {
+  assert.equal(supportsMultimodal('deepseek-flash'), true);
+  assert.equal(supportsMultimodal('deepseek-v4-pro'), false);
+  assert.equal(supportsMultimodal('custom-vl', { 'custom-vl': { input_modalities: ['text', 'image'] } }), true);
+  assert.equal(supportsMultimodal('custom-txt', { 'custom-txt': { input_modalities: ['text'] } }), false);
+
+  const blocks = buildUserContentBlocks('Analyze', [
+    { kind: 'document', fileId: 'file_123' },
+    { kind: 'image', dataUrl: 'data:image/png;base64,AAA' },
+  ]);
+  assert.equal(Array.isArray(blocks), true);
+  assert.equal(blocks.length, 3);
+  assert.deepEqual(blocks[0], { type: 'file', file_id: 'file_123' });
+  assert.deepEqual(blocks[1], { type: 'image_url', image_url: { url: 'data:image/png;base64,AAA' } });
+  assert.deepEqual(blocks[2], { type: 'text', text: 'Analyze' });
 });
 
 test('estimateCostUsd computes off-peak and peak rates', () => {
