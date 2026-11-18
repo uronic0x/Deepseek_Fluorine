@@ -2,19 +2,24 @@ package com.uronic0x.fluorine.bridge
 
 import android.content.Context
 import com.uronic0x.fluorine.engine.KotlinNativeEngine
+import com.uronic0x.fluorine.protocol.ChatAttachment
+import com.uronic0x.fluorine.protocol.StreamUiEvent
 import org.json.JSONObject
 import java.io.File
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Bridge between Android UI/ViewModel and the Fluorine Engine.
- * Supports JNI `libfluorine.so` when present on device and `KotlinNativeEngine`
- * with full parity for autonomous Agent Work mode, Prefix Cache optimization,
- * and custom endpoints/models.
+ * Aligns JNI symbols with `src/lib.rs` (`nativeGetMeta`, `nativeFetchModels`,
+ * `nativeStreamChat`, `nativeCancelStream`) and delegates streaming + multimodal
+ * execution through `KotlinNativeEngine` with instant cancellation.
  */
 object FluorineBridge {
 
     private var rustJniAvailable: Boolean = false
     private var defaultWorkspaceDir: File = File(System.getProperty("java.io.tmpdir", "/tmp"), "fluorine_workspace")
+    private var allowSdcardReadonly: Boolean = false
+    private val nextReqId = AtomicLong(1L)
 
     init {
         rustJniAvailable = try {
@@ -29,23 +34,20 @@ object FluorineBridge {
         val dir = File(context.filesDir, "workspace")
         dir.mkdirs()
         defaultWorkspaceDir = dir
-        if (rustJniAvailable) {
-            runCatching { nativeInit(dir.absolutePath, false) }
-        }
         return dir
     }
 
     fun getWorkspaceDir(): File = defaultWorkspaceDir
 
     fun setAllowSdcardReadonly(allow: Boolean) {
-        if (rustJniAvailable) {
-            runCatching { nativeInit(defaultWorkspaceDir.absolutePath, allow) }
-        }
+        allowSdcardReadonly = allow
     }
+
+    fun nextRequestId(): Long = nextReqId.getAndIncrement()
 
     fun engineInfoJson(): String {
         if (rustJniAvailable) {
-            val res = runCatching { nativeEngineInfo() }.getOrNull()
+            val res = runCatching { nativeGetMeta(defaultWorkspaceDir.absolutePath, allowSdcardReadonly) }.getOrNull()
             if (!res.isNullOrBlank()) return res
         }
         return KotlinNativeEngine.engineInfoJson(rustJniAvailable)
@@ -59,7 +61,7 @@ object FluorineBridge {
     ): String {
         val normalizedBase = KotlinNativeEngine.normalizeBaseUrl(baseUrl)
         if (rustJniAvailable && normalizedBase == "https://api.deepseek.com") {
-            val res = runCatching { nativeDiscoverCapabilities(apiKey) }.getOrNull()
+            val res = runCatching { nativeFetchModels(apiKey) }.getOrNull()
             if (!res.isNullOrBlank()) return res
         }
         return KotlinNativeEngine.discoverCapabilities(
@@ -70,11 +72,53 @@ object FluorineBridge {
         )
     }
 
+    fun uploadAttachmentFileJson(
+        apiKey: String,
+        baseUrl: String,
+        attachment: ChatAttachment,
+        connectTimeoutSec: Int = 20,
+        readTimeoutSec: Int = 150
+    ): String {
+        return KotlinNativeEngine.uploadFile(
+            apiKey = apiKey,
+            baseUrl = baseUrl,
+            attachment = attachment,
+            connectTimeoutSec = connectTimeoutSec,
+            readTimeoutSec = readTimeoutSec
+        ).toString()
+    }
+
     fun chatCompleteJson(requestJson: String): String {
-        // Use KotlinNativeEngine directly so all new capabilities (custom base_url, custom model,
-        // custom system_prompt, Prefix Cache subturn_messages, temperature, configurable timeouts)
-        // work consistently regardless of whether an older prebuilt libfluorine.so is present.
-        return KotlinNativeEngine.chatComplete(requestJson, defaultWorkspaceDir)
+        val reqId = nextRequestId()
+        return KotlinNativeEngine.chatCompleteStreaming(
+            requestId = reqId,
+            requestJson = requestJson,
+            defaultWorkspaceDir = defaultWorkspaceDir,
+            onEvent = null
+        )
+    }
+
+    fun chatCompleteStreamingJson(
+        requestId: Long,
+        requestJson: String,
+        onEvent: (StreamUiEvent) -> Unit
+    ): String {
+        return KotlinNativeEngine.chatCompleteStreaming(
+            requestId = requestId,
+            requestJson = requestJson,
+            defaultWorkspaceDir = defaultWorkspaceDir,
+            onEvent = onEvent
+        )
+    }
+
+    fun cancelStream(requestId: Long): Boolean {
+        val ktCancelled = KotlinNativeEngine.cancelStream(requestId)
+        val rustCancelled = if (rustJniAvailable) {
+            runCatching { nativeCancelStream(requestId) }.getOrDefault(false)
+        } else {
+            false
+        }
+        return ktCancelled || rustCancelled
     }
 
     fun executeLocalToolJson(
@@ -96,18 +140,26 @@ object FluorineBridge {
         return KotlinNativeEngine.buildUpstreamPayload(JSONObject(requestJson)).toString()
     }
 
-    @JvmStatic
-    private external fun nativeInit(workspacePath: String, allowSdcardReadonly: Boolean): String
+    interface JniStreamCallback {
+        fun onEvent(eventJson: String): Boolean
+    }
 
     @JvmStatic
-    private external fun nativeEngineInfo(): String
+    private external fun nativeGetMeta(workspacePath: String, allowSdcardReadonly: Boolean): String
 
     @JvmStatic
-    private external fun nativeDiscoverCapabilities(apiKey: String): String
+    private external fun nativeFetchModels(apiKey: String): String
 
     @JvmStatic
-    private external fun nativeChatComplete(requestJson: String): String
+    private external fun nativeStreamChat(
+        requestId: Long,
+        apiKey: String,
+        requestJson: String,
+        workspacePath: String,
+        allowSdcardReadonly: Boolean,
+        callback: JniStreamCallback
+    )
 
     @JvmStatic
-    private external fun nativeExecuteTool(name: String, argumentsJson: String): String
+    private external fun nativeCancelStream(requestId: Long): Boolean
 }

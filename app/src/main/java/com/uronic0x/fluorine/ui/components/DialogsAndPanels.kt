@@ -109,6 +109,7 @@ import kotlin.math.roundToInt
  * - Middle: Scrollable list of historical sessions (ConversationSession) with mode badge, rename, and delete
  * - Bottom pinned bar: Settings entry button (left/main), Workspace Files button, and Theme quick toggle
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SessionDrawerContent(
     sessions: List<ConversationSession>,
@@ -116,7 +117,7 @@ fun SessionDrawerContent(
     themeMode: AppThemeMode,
     workspaceFileCount: Int,
     onSelectSession: (String) -> Unit,
-    onNewSession: () -> Unit,
+    onNewSession: (String) -> Unit,
     onRenameSessionRequest: (ConversationSession) -> Unit,
     onDeleteSession: (String) -> Unit,
     onOpenWorkspaceFiles: () -> Unit,
@@ -125,21 +126,21 @@ fun SessionDrawerContent(
     modifier: Modifier = Modifier
 ) {
     var searchQuery by rememberSaveable { mutableStateOf("") }
+    var modeFilter by rememberSaveable { mutableStateOf("all") } // "all" | "chat" | "work"
 
-    val filteredSessions = remember(sessions, searchQuery) {
+    val filteredSessions = remember(sessions, searchQuery, modeFilter) {
         val q = searchQuery.trim()
-        if (q.isEmpty()) {
-            sessions
-        } else {
-            sessions.filter { session ->
+        sessions.filter { session ->
+            val modeMatch = modeFilter == "all" || session.mode == modeFilter
+            val queryMatch = q.isEmpty() ||
                 session.title.contains(q, ignoreCase = true) ||
-                    session.chatMessages.any { it.text.contains(q, ignoreCase = true) }
-            }
+                session.chatMessages.any { it.text.contains(q, ignoreCase = true) }
+            modeMatch && queryMatch
         }
     }
 
     ModalDrawerSheet(
-        modifier = modifier.width(310.dp),
+        modifier = modifier.width(320.dp),
         drawerContainerColor = MaterialTheme.colorScheme.surface,
         drawerContentColor = MaterialTheme.colorScheme.onSurface
     ) {
@@ -169,24 +170,44 @@ fun SessionDrawerContent(
                         )
                     }
 
-                    Button(
-                        onClick = onNewSession,
-                        shape = RoundedCornerShape(10.dp),
-                        contentPadding = androidx.compose.foundation.layout.PaddingValues(
-                            horizontal = 12.dp,
-                            vertical = 8.dp
-                        ),
-                        modifier = Modifier.testTag("drawer_new_session_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Outlined.Add,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            text = "新会话",
-                            style = MaterialTheme.typography.labelMedium
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        OutlinedButton(
+                            onClick = { onNewSession("chat") },
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                                horizontal = 10.dp,
+                                vertical = 6.dp
+                            ),
+                            modifier = Modifier.testTag("drawer_new_chat_button")
+                        ) {
+                            Icon(Icons.Outlined.Add, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(3.dp))
+                            Text("Chat", style = MaterialTheme.typography.labelMedium)
+                        }
+                        Button(
+                            onClick = { onNewSession("work") },
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                                horizontal = 10.dp,
+                                vertical = 6.dp
+                            ),
+                            modifier = Modifier.testTag("drawer_new_work_button")
+                        ) {
+                            Icon(Icons.Outlined.Add, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(3.dp))
+                            Text("Work", style = MaterialTheme.typography.labelMedium)
+                        }
+                    }
+                }
+
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    listOf("all" to "全部", "chat" to "Chat", "work" to "Work").forEach { (id, label) ->
+                        FilterChip(
+                            selected = modeFilter == id,
+                            onClick = { modeFilter = id },
+                            label = { Text(label, style = MaterialTheme.typography.labelSmall) }
                         )
                     }
                 }
@@ -1017,7 +1038,7 @@ fun SettingsDialog(
     onClearAllSessions: () -> Unit
 ) {
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
-    var draft by remember(uiState) {
+    var draft by remember(uiState.settingsOpenToken) {
         mutableStateOf(FluorineSettingsDraft.fromUiState(uiState))
     }
     var showApiKey by rememberSaveable { mutableStateOf(false) }
@@ -1034,22 +1055,26 @@ fun SettingsDialog(
 
     Dialog(
         onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false
+        )
     ) {
         Surface(
-            modifier = Modifier
-                .fillMaxWidth(0.95f)
-                .fillMaxHeight(0.90f),
-            shape = RoundedCornerShape(18.dp),
-            color = MaterialTheme.colorScheme.surface,
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+            modifier = Modifier.fillMaxSize(),
+            shape = RoundedCornerShape(0.dp),
+            color = MaterialTheme.colorScheme.surface
         ) {
-            Column(modifier = Modifier.fillMaxSize()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(top = 24.dp, bottom = 12.dp)
+            ) {
                 // Header
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(start = 18.dp, end = 12.dp, top = 14.dp, bottom = 8.dp),
+                        .padding(start = 18.dp, end = 12.dp, top = 8.dp, bottom = 8.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -1209,6 +1234,7 @@ data class FluorineSettingsDraft(
     val autoGenerateTitle: Boolean,
     val customChatSystemPrompt: String,
     val customWorkSystemPrompt: String,
+    val workToolsConfig: com.uronic0x.fluorine.protocol.WorkToolsConfig,
     val allowSdcardReadonly: Boolean,
     val shellTimeoutSec: Int
 ) {
@@ -1241,8 +1267,9 @@ data class FluorineSettingsDraft(
                 maxHistoryTurns = s.maxHistoryTurns,
                 enableLatestReminder = s.enableLatestReminder,
                 autoGenerateTitle = s.autoGenerateTitle,
-                customChatSystemPrompt = s.customChatSystemPrompt,
-                customWorkSystemPrompt = s.customWorkSystemPrompt,
+                customChatSystemPrompt = s.customChatSystemPrompt.ifBlank { CoreProtocol.DEFAULT_CHAT_SYSTEM_PROMPT },
+                customWorkSystemPrompt = s.customWorkSystemPrompt.ifBlank { CoreProtocol.DEFAULT_WORK_SYSTEM_PROMPT },
+                workToolsConfig = s.workToolsConfig,
                 allowSdcardReadonly = s.allowSdcardReadonly,
                 shellTimeoutSec = s.shellTimeoutSec
             )
@@ -1609,9 +1636,9 @@ private fun AgentPromptSettingsTab(
         )
     }
 
-    SettingsSectionCard(title = "自定义 System Prompt（留空使用内置规范提示词）") {
+    SettingsSectionCard(title = "可编辑 System Prompt（无锁定隐藏词）") {
         Text(
-            text = "为保证 DeepSeek Prefix Cache（上下文硬盘缓存）高命中率，System Prompt 会固定在 messages[0]，会话中途不做动态拼接篡改。",
+            text = "为保证 DeepSeek Prefix Cache 高命中率，System Prompt 会固定置于 messages[0]；下方展示的就是实际发送的全部系统提示词，可自由修改或恢复默认。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -1620,22 +1647,24 @@ private fun AgentPromptSettingsTab(
             value = draft.customChatSystemPrompt,
             onValueChange = { onDraftChange(draft.copy(customChatSystemPrompt = it)) },
             label = { Text(stringResource(R.string.settings_chat_prompt_label)) },
-            placeholder = { Text(CoreProtocol.DEFAULT_CHAT_SYSTEM_PROMPT) },
-            minLines = 3,
-            maxLines = 6,
+            minLines = 4,
+            maxLines = 8,
             shape = RoundedCornerShape(10.dp),
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("chat_system_prompt_input")
         )
 
         OutlinedTextField(
             value = draft.customWorkSystemPrompt,
             onValueChange = { onDraftChange(draft.copy(customWorkSystemPrompt = it)) },
             label = { Text(stringResource(R.string.settings_work_prompt_label)) },
-            placeholder = { Text(CoreProtocol.DEFAULT_WORK_SYSTEM_PROMPT) },
-            minLines = 4,
-            maxLines = 8,
+            minLines = 5,
+            maxLines = 10,
             shape = RoundedCornerShape(10.dp),
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("work_system_prompt_input")
         )
 
         Row(
@@ -1646,8 +1675,8 @@ private fun AgentPromptSettingsTab(
                 onClick = {
                     onDraftChange(
                         draft.copy(
-                            customChatSystemPrompt = "",
-                            customWorkSystemPrompt = ""
+                            customChatSystemPrompt = CoreProtocol.DEFAULT_CHAT_SYSTEM_PROMPT,
+                            customWorkSystemPrompt = CoreProtocol.DEFAULT_WORK_SYSTEM_PROMPT
                         )
                     )
                 }
@@ -1658,6 +1687,7 @@ private fun AgentPromptSettingsTab(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun WorkspaceSettingsTab(
     draft: FluorineSettingsDraft,
@@ -1666,6 +1696,141 @@ private fun WorkspaceSettingsTab(
     onOpenWorkspaceFiles: () -> Unit,
     onDraftChange: (FluorineSettingsDraft) -> Unit
 ) {
+    val cfg = draft.workToolsConfig
+    var showFineGrainedTools by rememberSaveable { mutableStateOf(false) }
+
+    SettingsSectionCard(title = "Work 模式工具注入与设备控制") {
+        Text(
+            text = "按需自定义注入给 Work Agent 的本地工具组；声明与执行端会严格保持一致。可随时在设备端开启任意 Shell 与设备控制工具。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        SettingsSwitchRow(
+            title = "确定性计算工具 (9 个)",
+            subtitle = "calc, stats, unit_convert, date_calc, text_metrics, json_query, csv_summary, text_diff, encode_hash",
+            checked = cfg.deterministic,
+            onCheckedChange = { onDraftChange(draft.copy(workToolsConfig = cfg.copy(deterministic = it))) }
+        )
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        SettingsSwitchRow(
+            title = "工作区只读工具 (fs_list / fs_read / fs_search)",
+            subtitle = "浏览、读取和搜索工作区文件（及授权后的只读 /sdcard）",
+            checked = cfg.workspaceRead,
+            onCheckedChange = { onDraftChange(draft.copy(workToolsConfig = cfg.copy(workspaceRead = it))) }
+        )
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        SettingsSwitchRow(
+            title = "工作区写入工具 (fs_write / fs_edit)",
+            subtitle = "在工作区沙盒内创建、追加和局部修改文件",
+            checked = cfg.workspaceWrite,
+            onCheckedChange = { onDraftChange(draft.copy(workToolsConfig = cfg.copy(workspaceWrite = it))) }
+        )
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        SettingsSwitchRow(
+            title = "Git 仓库检查 (git_cmd)",
+            subtitle = "执行 status, diff, log, show, branch, rev-parse",
+            checked = cfg.git,
+            onCheckedChange = { onDraftChange(draft.copy(workToolsConfig = cfg.copy(git = it))) }
+        )
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        SettingsSwitchRow(
+            title = "任意 Shell 命令执行 (shell_exec)",
+            subtitle = "开启后允许 Work Agent 在工作区内执行 sh -c 命令（带超时与危险命令防误触拦截）",
+            checked = cfg.shellExec,
+            onCheckedChange = { onDraftChange(draft.copy(workToolsConfig = cfg.copy(shellExec = it))) }
+        )
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        SettingsSwitchRow(
+            title = "设备控制与系统诊断 (termux_api / self_adb)",
+            subtitle = "开启后允许调用 termux-* 扩展或本地 Android dumpsys/pm/wm/am/input 诊断指令",
+            checked = cfg.deviceControl,
+            onCheckedChange = { onDraftChange(draft.copy(workToolsConfig = cfg.copy(deviceControl = it))) }
+        )
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "当前生效工具数：${cfg.enabledToolNames().size} / 18",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                TextButton(
+                    onClick = {
+                        onDraftChange(
+                            draft.copy(
+                                workToolsConfig = com.uronic0x.fluorine.protocol.WorkToolsConfig(
+                                    deterministic = true,
+                                    workspaceRead = true,
+                                    workspaceWrite = true,
+                                    git = true,
+                                    shellExec = true,
+                                    deviceControl = true,
+                                    disabledTools = emptySet()
+                                )
+                            )
+                        )
+                    }
+                ) {
+                    Text("全部开启")
+                }
+                TextButton(
+                    onClick = { showFineGrainedTools = !showFineGrainedTools }
+                ) {
+                    Text(if (showFineGrainedTools) "收起单工具列表" else "逐个工具定制")
+                }
+            }
+        }
+
+        AnimatedVisibility(visible = showFineGrainedTools) {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                com.uronic0x.fluorine.protocol.WorkToolsConfig.ALL_DESCRIPTORS.forEach { desc ->
+                    val enabled = cfg.isToolEnabled(desc.name)
+                    FilterChip(
+                        selected = enabled,
+                        onClick = {
+                            val newDisabled = cfg.disabledTools.toMutableSet()
+                            val catEnabled = when (desc.category) {
+                                "deterministic" -> cfg.deterministic
+                                "workspace_read" -> cfg.workspaceRead
+                                "workspace_write" -> cfg.workspaceWrite
+                                "git" -> cfg.git
+                                "shell_exec" -> cfg.shellExec
+                                "device_control" -> cfg.deviceControl
+                                else -> true
+                            }
+                            if (enabled) {
+                                newDisabled.add(desc.name)
+                                onDraftChange(draft.copy(workToolsConfig = cfg.copy(disabledTools = newDisabled)))
+                            } else {
+                                newDisabled.remove(desc.name)
+                                val nextCfg = when (desc.category) {
+                                    "deterministic" -> cfg.copy(deterministic = true, disabledTools = newDisabled)
+                                    "workspace_read" -> cfg.copy(workspaceRead = true, disabledTools = newDisabled)
+                                    "workspace_write" -> cfg.copy(workspaceWrite = true, disabledTools = newDisabled)
+                                    "git" -> cfg.copy(git = true, disabledTools = newDisabled)
+                                    "shell_exec" -> cfg.copy(shellExec = true, disabledTools = newDisabled)
+                                    "device_control" -> cfg.copy(deviceControl = true, disabledTools = newDisabled)
+                                    else -> if (catEnabled) cfg.copy(disabledTools = newDisabled) else cfg.copy(disabledTools = newDisabled)
+                                }
+                                onDraftChange(draft.copy(workToolsConfig = nextCfg))
+                            }
+                        },
+                        label = { Text(desc.name, style = MaterialTheme.typography.labelSmall) }
+                    )
+                }
+            }
+        }
+    }
+
     SettingsSectionCard(title = "工作区目录与生成产物导出") {
         Text(
             text = "当前工作区沙盒路径：\n$workspacePath",
@@ -1696,7 +1861,7 @@ private fun WorkspaceSettingsTab(
         }
     }
 
-    SettingsSectionCard(title = "本地 Harness 权限与超时") {
+    SettingsSectionCard(title = "外部目录访问与命令超时") {
         SettingsSwitchRow(
             title = stringResource(R.string.settings_sdcard_label),
             subtitle = "开启后 fs_read / fs_list / fs_search 可按绝对路径只读访问 /sdcard，但写入操作仍严格限制在应用沙盒工作区内",

@@ -20,15 +20,20 @@
 
     <!-- Welcome -->
     <string name="welcome_eyebrow">Fluorine</string>
-    <string name="welcome_title">想清楚，\n再动手执行。</string>
-    <string name="welcome_desc"></string>
+    <string name="welcome_title">Fluorine</string>
+    <string name="welcome_desc">DeepSeek 2026-11 工作台 · Chat 与 Work 会话隔离</string>
 
     <!-- Composer -->
     <string name="prompt_placeholder">输入问题或任务…</string>
-    <string name="toggle_web">联网搜索</string>
-    <string name="toggle_thinking">深度思考</string>
+    <string name="toggle_web">Search</string>
+    <string name="toggle_thinking">Think</string>
     <string name="send_action">发送</string>
+    <string name="stop_action">停止</string>
     <string name="sending_action">执行中…</string>
+    <string name="attach_camera">Camera</string>
+    <string name="attach_photo">Photo</string>
+    <string name="attach_document">Document</string>
+    <string name="attach_add_more">Add more</string>
 
     <!-- Message & Artifacts -->
     <string name="role_user">用户</string>
@@ -56,7 +61,7 @@
     <string name="settings_tab_connection">连接与网络</string>
     <string name="settings_tab_model">模型与推理</string>
     <string name="settings_tab_agent">Agent与提示词</string>
-    <string name="settings_tab_workspace">工作区与终端</string>
+    <string name="settings_tab_workspace">工具与工作区</string>
     <string name="settings_tab_data">日志与数据导出</string>
 
     <string name="settings_theme_label">界面主题（默认暗色 / 白色可切换）</string>
@@ -79,7 +84,7 @@
     <string name="settings_custom_model_label">自定义模型 ID（留空则使用上方预设模型）</string>
     <string name="settings_custom_model_hint">例如 deepseek-flash、deepseek-v4-pro 或自定义模型名</string>
     <string name="settings_thinking_mode_label">思考模式策略 (thinking.type)</string>
-    <string name="settings_effort_label">推理强度 (reasoning.effort)</string>
+    <string name="settings_effort_label">推理强度 (reasoning_effort)</string>
     <string name="settings_max_tokens_label">最大输出 Token 预算 (max_tokens)</string>
     <string name="settings_custom_max_tokens_label">自定义最大输出 Token (256 ~ 393216)</string>
     <string name="settings_unlock_web_label">允许任意模型尝试启用内置联网搜索</string>
@@ -88,8 +93,8 @@
     <string name="settings_max_history_label">携带历史上下文轮数上限</string>
     <string name="settings_latest_reminder_label">注入 latest_reminder 元信息提示</string>
     <string name="settings_auto_title_label">自动根据首条消息生成会话标题</string>
-    <string name="settings_chat_prompt_label">Chat 模式自定义 System Prompt（留空使用内置默认）</string>
-    <string name="settings_work_prompt_label">Work 模式自定义 System Prompt（留空使用内置默认）</string>
+    <string name="settings_chat_prompt_label">Chat 模式 System Prompt（可直接编辑全部内容）</string>
+    <string name="settings_work_prompt_label">Work 模式 System Prompt（可直接编辑全部内容）</string>
     <string name="settings_reset_prompts">恢复默认提示词</string>
 
     <string name="settings_sdcard_label">允许只读访问 /sdcard 外部存储</string>

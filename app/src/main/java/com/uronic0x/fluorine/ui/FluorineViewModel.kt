@@ -3,18 +3,24 @@ package com.uronic0x.fluorine.ui
 import android.app.Application
 import android.content.Context
 import android.net.Uri
+import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.uronic0x.fluorine.bridge.FluorineBridge
+import com.uronic0x.fluorine.protocol.ChatAttachment
 import com.uronic0x.fluorine.protocol.ChatMessage
 import com.uronic0x.fluorine.protocol.ContextTurn
 import com.uronic0x.fluorine.protocol.ConversationSession
 import com.uronic0x.fluorine.protocol.CoreProtocol
 import com.uronic0x.fluorine.protocol.LocalToolCallRecord
+import com.uronic0x.fluorine.protocol.ModelCapabilityInfo
+import com.uronic0x.fluorine.protocol.StreamUiEvent
+import com.uronic0x.fluorine.protocol.WorkToolsConfig
 import com.uronic0x.fluorine.protocol.WorkspaceFileArtifact
 import com.uronic0x.fluorine.ui.components.FluorineSettingsDraft
 import com.uronic0x.fluorine.ui.theme.AppThemeMode
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -44,7 +50,7 @@ data class FluorineUiState(
     val enableLatex: Boolean = true,
     val defaultExpandThinking: Boolean = false,
     val defaultExpandTools: Boolean = false,
-    val defaultExpandSources: Boolean = false, // Search links collapsed by default (#9)
+    val defaultExpandSources: Boolean = false,
 
     // API & Network settings
     val apiKey: String = "",
@@ -64,30 +70,36 @@ data class FluorineUiState(
     val maxTokens: Int = 16384,
     val temperature: Float = 1.0f,
     val enableTemperature: Boolean = false,
+    val discoveredCapabilities: Map<String, ModelCapabilityInfo> = CoreProtocol.DEFAULT_MODEL_CAPABILITIES,
 
     // Agent & Prompt settings
     val maxToolRounds: Int = 10,
     val maxHistoryTurns: Int = 24,
     val enableLatestReminder: Boolean = true,
     val autoGenerateTitle: Boolean = true,
-    val customChatSystemPrompt: String = "",
-    val customWorkSystemPrompt: String = "",
+    val customChatSystemPrompt: String = CoreProtocol.DEFAULT_CHAT_SYSTEM_PROMPT,
+    val customWorkSystemPrompt: String = CoreProtocol.DEFAULT_WORK_SYSTEM_PROMPT,
 
-    // Workspace & Harness settings
+    // Work Mode Tool Injection & Workspace settings
+    val workToolsConfig: WorkToolsConfig = WorkToolsConfig(),
     val allowSdcardReadonly: Boolean = false,
     val shellTimeoutSec: Int = 20,
     val workspacePath: String = "",
     val workspaceFiles: List<WorkspaceFileArtifact> = emptyList(),
 
-    // Composer & Runtime state
+    // Composer, Multimodal Attachments & Runtime state
     val promptInput: String = "",
+    val pendingAttachments: List<ChatAttachment> = emptyList(),
+    val pdfParsePurpose: String = "text_recognition", // "text_recognition" | "rich_layout_recognition"
     val isBusy: Boolean = false,
+    val activeRequestId: Long = 0L,
     val transientNotice: String? = null,
     val taskStatusText: String = "就绪",
     val toolsText: String = "",
 
     // Modals & Dialogs
     val showSettingsDialog: Boolean = false,
+    val settingsOpenToken: Int = 0,
     val showWorkspaceFilesDialog: Boolean = false,
     val previewArtifact: WorkspaceFileArtifact? = null,
     val previewArtifactContent: String = "",
@@ -102,10 +114,14 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
     private val prefs = application.getSharedPreferences("fluorine_prefs", Context.MODE_PRIVATE)
     private val sessionsStoreFile = File(application.filesDir, "sessions_store.json")
     private val legacySessionFile = File(application.filesDir, "session_state.json")
+    private val attachmentsDir = File(application.filesDir, "attachments").apply { mkdirs() }
+    private val cameraCapturesDir = File(application.filesDir, "camera_captures").apply { mkdirs() }
     private val workspaceDir: File = FluorineBridge.initWorkspace(application)
 
     private val _uiState = MutableStateFlow(FluorineUiState())
     val uiState: StateFlow<FluorineUiState> = _uiState.asStateFlow()
+
+    private var activeExecutionJob: Job? = null
 
     init {
         CoreProtocol.AppLogger.info("App", "FluorineViewModel initialized; workspace=${workspaceDir.absolutePath}")
@@ -151,8 +167,18 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
         val maxHistoryTurns = prefs.getInt("max_history_turns", 24).coerceIn(4, 80)
         val enableLatestReminder = prefs.getBoolean("enable_latest_reminder", true)
         val autoGenerateTitle = prefs.getBoolean("auto_generate_title", true)
-        val customChatSystemPrompt = prefs.getString("custom_chat_system_prompt", "") ?: ""
-        val customWorkSystemPrompt = prefs.getString("custom_work_system_prompt", "") ?: ""
+
+        val customChatSystemPrompt = prefs.getString("custom_chat_system_prompt", "")
+            ?.ifBlank { CoreProtocol.DEFAULT_CHAT_SYSTEM_PROMPT }
+            ?: CoreProtocol.DEFAULT_CHAT_SYSTEM_PROMPT
+        val customWorkSystemPrompt = prefs.getString("custom_work_system_prompt", "")
+            ?.ifBlank { CoreProtocol.DEFAULT_WORK_SYSTEM_PROMPT }
+            ?: CoreProtocol.DEFAULT_WORK_SYSTEM_PROMPT
+
+        val toolConfigJsonStr = prefs.getString("work_tools_config_json", null)
+        val workToolsConfig = toolConfigJsonStr
+            ?.let { runCatching { WorkToolsConfig.fromJson(JSONObject(it)) }.getOrNull() }
+            ?: WorkToolsConfig()
 
         val savedSdcard = prefs.getBoolean("allow_sdcard", false)
         val shellTimeoutSec = prefs.getInt("shell_timeout_sec", 20).coerceIn(5, 120)
@@ -202,6 +228,7 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
                 autoGenerateTitle = autoGenerateTitle,
                 customChatSystemPrompt = customChatSystemPrompt,
                 customWorkSystemPrompt = customWorkSystemPrompt,
+                workToolsConfig = workToolsConfig,
                 allowSdcardReadonly = savedSdcard,
                 shellTimeoutSec = shellTimeoutSec,
                 workspacePath = workspaceDir.absolutePath,
@@ -220,7 +247,6 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
                 return list to validActive
             }
         }
-        // Migrate from legacy single-session file if present
         if (legacySessionFile.exists()) {
             val raw = runCatching { legacySessionFile.readText(Charsets.UTF_8) }.getOrDefault("")
             val (msgs, ctx) = CoreProtocol.deserializeSession(raw)
@@ -254,74 +280,109 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
         return list to initial.id
     }
 
+    /**
+     * Atomic write using a temp file + rename so truncated/corrupted writes never destroy `sessions_store.json`.
+     */
     private fun persistSessionsToDisk(sessions: List<ConversationSession>, activeId: String) {
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching {
+            val res = runCatching {
                 val json = CoreProtocol.serializeSessionsStore(sessions, activeId)
-                sessionsStoreFile.writeText(json, Charsets.UTF_8)
+                val tmp = File(sessionsStoreFile.parentFile, "sessions_store.json.tmp")
+                tmp.writeText(json, Charsets.UTF_8)
+                if (!tmp.renameTo(sessionsStoreFile)) {
+                    sessionsStoreFile.writeText(json, Charsets.UTF_8)
+                    tmp.delete()
+                }
+            }
+            res.onFailure { err ->
+                CoreProtocol.AppLogger.error("Storage", "Failed to save sessions_store.json: ${err.message}")
             }
         }
     }
 
-    private fun syncActiveSessionState(
-        title: String = _uiState.value.conversationTitle,
-        mode: String = _uiState.value.mode,
-        chatMessages: List<ChatMessage> = _uiState.value.chatMessages,
-        contextHistory: List<ContextTurn> = _uiState.value.contextHistory,
-        touchUpdatedAt: Boolean = true
+    private fun updateSessionById(
+        targetSessionId: String,
+        title: String? = null,
+        mode: String? = null,
+        chatMessages: List<ChatMessage>? = null,
+        contextHistory: List<ContextTurn>? = null,
+        touchUpdatedAt: Boolean = true,
+        persist: Boolean = true
     ) {
-        val s = _uiState.value
         val now = System.currentTimeMillis()
-        val updatedList = s.sessions.map { item ->
-            if (item.id == s.activeSessionId) {
-                item.copy(
-                    title = title,
-                    mode = mode,
+        var updatedTarget: ConversationSession? = null
+        val updatedList = _uiState.value.sessions.map { item ->
+            if (item.id == targetSessionId) {
+                val copy = item.copy(
+                    title = title ?: item.title,
+                    mode = mode ?: item.mode,
                     updatedAt = if (touchUpdatedAt) now else item.updatedAt,
-                    chatMessages = chatMessages,
-                    contextHistory = contextHistory
+                    chatMessages = chatMessages ?: item.chatMessages,
+                    contextHistory = contextHistory ?: item.contextHistory
                 )
+                updatedTarget = copy
+                copy
             } else {
                 item
             }
         }
-        _uiState.update {
-            it.copy(
-                sessions = updatedList,
-                conversationTitle = title,
-                mode = mode,
-                chatMessages = chatMessages,
-                contextHistory = contextHistory
-            )
+
+        _uiState.update { state ->
+            val currentActive = state.activeSessionId == targetSessionId
+            val target = updatedTarget
+            if (currentActive && target != null) {
+                state.copy(
+                    sessions = updatedList,
+                    conversationTitle = target.title,
+                    mode = target.mode,
+                    chatMessages = target.chatMessages,
+                    contextHistory = target.contextHistory
+                )
+            } else {
+                state.copy(sessions = updatedList)
+            }
         }
-        persistSessionsToDisk(updatedList, s.activeSessionId)
+
+        if (persist) {
+            persistSessionsToDisk(updatedList, _uiState.value.activeSessionId)
+        }
     }
 
     // ========================================================================
-    // Multi-Session Management (Requirement #2)
+    // Multi-Session Management (Strict Chat vs Work Isolation)
     // ========================================================================
 
-    fun newConversation() {
-        if (_uiState.value.isBusy) return
+    fun newConversation(targetMode: String? = null) {
+        if (_uiState.value.isBusy) {
+            _uiState.update { it.copy(transientNotice = "生成进行中，请先停止当前任务") }
+            return
+        }
         val current = _uiState.value
-        // If current active session is already empty, just reset its state cleanly
+        val resolvedMode = if (targetMode == "chat" || targetMode == "work") targetMode else current.mode
         val active = current.sessions.firstOrNull { it.id == current.activeSessionId }
         if (active != null && active.chatMessages.isEmpty()) {
+            val updatedList = current.sessions.map {
+                if (it.id == active.id) it.copy(mode = resolvedMode, title = "新对话") else it
+            }
             _uiState.update {
                 it.copy(
+                    sessions = updatedList,
                     conversationTitle = "新对话",
+                    mode = resolvedMode,
                     promptInput = "",
+                    pendingAttachments = emptyList(),
                     taskStatusText = "就绪",
                     toolsText = ""
                 )
             }
+            persistSessionsToDisk(updatedList, active.id)
             return
         }
 
         val newSession = ConversationSession(
             id = UUID.randomUUID().toString(),
-            title = "新对话",
-            mode = current.mode,
+            title = if (resolvedMode == "work") "新 Work 任务" else "新对话",
+            mode = resolvedMode,
             createdAt = System.currentTimeMillis(),
             updatedAt = System.currentTimeMillis(),
             chatMessages = emptyList(),
@@ -333,18 +394,24 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
                 sessions = updatedSessions,
                 activeSessionId = newSession.id,
                 conversationTitle = newSession.title,
+                mode = newSession.mode,
                 chatMessages = emptyList(),
                 contextHistory = emptyList(),
                 promptInput = "",
+                pendingAttachments = emptyList(),
                 taskStatusText = "就绪",
                 toolsText = ""
             )
         }
+        prefs.edit().putString("mode", resolvedMode).apply()
         persistSessionsToDisk(updatedSessions, newSession.id)
     }
 
     fun selectSession(sessionId: String) {
-        if (_uiState.value.isBusy) return
+        if (_uiState.value.isBusy) {
+            _uiState.update { it.copy(transientNotice = "当前会话正在生成，请先停止后再切换") }
+            return
+        }
         val target = _uiState.value.sessions.firstOrNull { it.id == sessionId } ?: return
         _uiState.update {
             it.copy(
@@ -353,11 +420,57 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
                 mode = target.mode,
                 chatMessages = target.chatMessages,
                 contextHistory = target.contextHistory,
+                pendingAttachments = emptyList(),
                 taskStatusText = "就绪",
                 toolsText = ""
             )
         }
+        prefs.edit().putString("mode", target.mode).apply()
         persistSessionsToDisk(_uiState.value.sessions, target.id)
+    }
+
+    /**
+     * Strict Chat / Work isolation:
+     * - If the active session has no messages yet, switches its empty draft mode directly.
+     * - If the active session already contains messages, NEVER mutates that session's mode;
+     *   instead switches to the latest existing session of `newMode` or creates a fresh `newMode` session.
+     */
+    fun setMode(newMode: String) {
+        if (newMode != "chat" && newMode != "work") return
+        val current = _uiState.value
+        if (current.isBusy) {
+            _uiState.update { it.copy(transientNotice = "生成进行中，请先停止后再切换模式") }
+            return
+        }
+        if (current.mode == newMode) return
+
+        prefs.edit().putString("mode", newMode).apply()
+
+        if (current.chatMessages.isEmpty()) {
+            updateSessionById(
+                targetSessionId = current.activeSessionId,
+                mode = newMode,
+                title = if (newMode == "work") "新 Work 任务" else "新对话",
+                touchUpdatedAt = false
+            )
+            return
+        }
+
+        val matchingSession = current.sessions
+            .filter { it.mode == newMode }
+            .maxByOrNull { it.updatedAt }
+
+        if (matchingSession != null) {
+            selectSession(matchingSession.id)
+            _uiState.update {
+                it.copy(transientNotice = "已保持原会话隔离，切换至 ${if (newMode == "work") "Work" else "Chat"} 会话")
+            }
+        } else {
+            newConversation(newMode)
+            _uiState.update {
+                it.copy(transientNotice = "已新建独立的 ${if (newMode == "work") "Work" else "Chat"} 会话")
+            }
+        }
     }
 
     fun requestRenameSession(session: ConversationSession?) {
@@ -403,6 +516,7 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
                     conversationTitle = fresh.title,
                     chatMessages = emptyList(),
                     contextHistory = emptyList(),
+                    pendingAttachments = emptyList(),
                     taskStatusText = "就绪",
                     toolsText = ""
                 )
@@ -421,7 +535,8 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
                     conversationTitle = nextActive.title,
                     mode = nextActive.mode,
                     chatMessages = nextActive.chatMessages,
-                    contextHistory = nextActive.contextHistory
+                    contextHistory = nextActive.contextHistory,
+                    pendingAttachments = emptyList()
                 )
             }
             persistSessionsToDisk(remaining, nextActive.id)
@@ -447,6 +562,7 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
                 conversationTitle = fresh.title,
                 chatMessages = emptyList(),
                 contextHistory = emptyList(),
+                pendingAttachments = emptyList(),
                 taskStatusText = "就绪",
                 toolsText = "",
                 transientNotice = "已清空全部历史会话"
@@ -456,7 +572,7 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
     }
 
     // ========================================================================
-    // Mode, Toggles & Settings
+    // Toggles, Settings & Multimodal Attachment Management
     // ========================================================================
 
     fun clearTransientNotice() {
@@ -465,11 +581,150 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    fun setMode(newMode: String) {
-        if (newMode != "chat" && newMode != "work") return
-        _uiState.update { it.copy(mode = newMode) }
-        prefs.edit().putString("mode", newMode).apply()
-        syncActiveSessionState(mode = newMode, touchUpdatedAt = false)
+    fun isMultimodalSupportedForCurrentModel(): Boolean {
+        val s = _uiState.value
+        return CoreProtocol.supportsMultimodal(s.model, s.discoveredCapabilities)
+    }
+
+    fun notifyMultimodalUnavailable() {
+        val m = _uiState.value.model
+        _uiState.update {
+            it.copy(
+                transientNotice = "当前模型（$m）不支持图片或文件上传（仅支持纯文本）；请切换至 deepseek-flash 或其他多模态模型"
+            )
+        }
+    }
+
+    fun setPdfParsePurpose(purpose: String) {
+        if (purpose == "text_recognition" || purpose == "rich_layout_recognition") {
+            _uiState.update { it.copy(pdfParsePurpose = purpose) }
+        }
+    }
+
+    fun createCameraCaptureFile(): File {
+        val name = "cam_${System.currentTimeMillis()}.jpg"
+        return File(cameraCapturesDir, name)
+    }
+
+    fun addCameraCapture(file: File) {
+        if (!isMultimodalSupportedForCurrentModel()) {
+            notifyMultimodalUnavailable()
+            runCatching { file.delete() }
+            return
+        }
+        if (!file.exists() || file.length() <= 0L) {
+            _uiState.update { it.copy(transientNotice = "未获取到拍摄照片") }
+            return
+        }
+        val att = ChatAttachment(
+            id = UUID.randomUUID().toString(),
+            name = file.name,
+            mimeType = "image/jpeg",
+            kind = "image",
+            localPath = file.absolutePath,
+            sizeBytes = file.length(),
+            parsePurpose = "user_data"
+        )
+        _uiState.update {
+            it.copy(
+                pendingAttachments = it.pendingAttachments + att,
+                transientNotice = "已添加照片 (${CoreProtocol.formatFileSize(att.sizeBytes)})"
+            )
+        }
+    }
+
+    fun addUriAttachment(context: Context, uri: Uri, requestedKind: String) {
+        if (!isMultimodalSupportedForCurrentModel()) {
+            notifyMultimodalUnavailable()
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val res = runCatching {
+                val cr = context.contentResolver
+                val mime = cr.getType(uri) ?: if (requestedKind == "image") "image/jpeg" else "application/octet-stream"
+                var displayName = if (requestedKind == "image") "image_${System.currentTimeMillis()}.jpg" else "doc_${System.currentTimeMillis()}"
+                cr.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        if (idx >= 0) {
+                            val n = cursor.getString(idx)
+                            if (!n.isNullOrBlank()) displayName = n
+                        }
+                    }
+                }
+                val safeName = displayName.replace(Regex("[^A-Za-z0-9._\\-\\u4e00-\\u9fff]"), "_")
+                val dest = File(attachmentsDir, "${UUID.randomUUID().toString().take(8)}_$safeName")
+                cr.openInputStream(uri)?.use { input ->
+                    dest.outputStream().use { output ->
+                        input.copyTo(output)
+                    }
+                } ?: throw IllegalStateException("无法读取所选文件")
+
+                val size = dest.length()
+                val ext = safeName.substringAfterLast('.', "").lowercase(Locale.ROOT)
+                val isImage = requestedKind == "image" ||
+                    mime.startsWith("image/") ||
+                    ext in setOf("jpg", "jpeg", "png", "gif", "webp")
+
+                if (isImage) {
+                    if (size > 64L * 1024L * 1024L) {
+                        dest.delete()
+                        throw IllegalArgumentException("图片大小超过 DeepSeek 64 MiB 上限")
+                    }
+                    ChatAttachment(
+                        id = UUID.randomUUID().toString(),
+                        name = safeName,
+                        mimeType = if (mime.startsWith("image/")) mime else "image/jpeg",
+                        kind = "image",
+                        localPath = dest.absolutePath,
+                        sizeBytes = size,
+                        parsePurpose = "user_data"
+                    )
+                } else {
+                    val isRichParseDoc = ext in setOf("pdf", "doc", "docx", "ppt", "pptx") ||
+                        mime == "application/pdf" ||
+                        mime.contains("word") ||
+                        mime.contains("powerpoint") ||
+                        mime.contains("presentation")
+                    val maxBytes = if (isRichParseDoc) 100L * 1024L * 1024L else 32L * 1024L * 1024L
+                    if (size > maxBytes) {
+                        dest.delete()
+                        throw IllegalArgumentException("文件超过官方 ${if (isRichParseDoc) "100 MiB" else "32 MiB"} 上限")
+                    }
+                    val purpose = if (isRichParseDoc) _uiState.value.pdfParsePurpose else "user_data"
+                    ChatAttachment(
+                        id = UUID.randomUUID().toString(),
+                        name = safeName,
+                        mimeType = mime,
+                        kind = if (isRichParseDoc) "document" else "text",
+                        localPath = dest.absolutePath,
+                        sizeBytes = size,
+                        parsePurpose = purpose
+                    )
+                }
+            }
+            withContext(Dispatchers.Main) {
+                res.fold(
+                    onSuccess = { att ->
+                        _uiState.update {
+                            it.copy(
+                                pendingAttachments = it.pendingAttachments + att,
+                                transientNotice = "已添加：${att.name} (${CoreProtocol.formatFileSize(att.sizeBytes)})"
+                            )
+                        }
+                    },
+                    onFailure = { err ->
+                        _uiState.update { it.copy(transientNotice = "附件添加失败: ${err.message}") }
+                    }
+                )
+            }
+        }
+    }
+
+    fun removePendingAttachment(attachmentId: String) {
+        _uiState.update {
+            it.copy(pendingAttachments = it.pendingAttachments.filterNot { att -> att.id == attachmentId })
+        }
     }
 
     fun toggleWeb() {
@@ -510,7 +765,12 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
 
     fun openSettings(open: Boolean) {
         if (open) refreshWorkspaceFiles()
-        _uiState.update { it.copy(showSettingsDialog = open) }
+        _uiState.update {
+            it.copy(
+                showSettingsDialog = open,
+                settingsOpenToken = if (open) it.settingsOpenToken + 1 else it.settingsOpenToken
+            )
+        }
     }
 
     fun saveSettings(draft: FluorineSettingsDraft) {
@@ -522,6 +782,9 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
         }
         val normalizedBaseUrl = draft.baseUrl.trim().ifEmpty { CoreProtocol.DEFAULT_API_BASE_URL }
         val clampedTokens = draft.maxTokens.coerceIn(256, 393216)
+
+        val chatPromptToSave = draft.customChatSystemPrompt.ifBlank { CoreProtocol.DEFAULT_CHAT_SYSTEM_PROMPT }
+        val workPromptToSave = draft.customWorkSystemPrompt.ifBlank { CoreProtocol.DEFAULT_WORK_SYSTEM_PROMPT }
 
         FluorineBridge.setAllowSdcardReadonly(draft.allowSdcardReadonly)
 
@@ -551,8 +814,9 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
                 maxHistoryTurns = draft.maxHistoryTurns,
                 enableLatestReminder = draft.enableLatestReminder,
                 autoGenerateTitle = draft.autoGenerateTitle,
-                customChatSystemPrompt = draft.customChatSystemPrompt.trim(),
-                customWorkSystemPrompt = draft.customWorkSystemPrompt.trim(),
+                customChatSystemPrompt = chatPromptToSave,
+                customWorkSystemPrompt = workPromptToSave,
+                workToolsConfig = draft.workToolsConfig,
                 allowSdcardReadonly = draft.allowSdcardReadonly,
                 shellTimeoutSec = draft.shellTimeoutSec,
                 transientNotice = "设置已保存 · $effectiveModel"
@@ -588,13 +852,17 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
             putInt("max_history_turns", draft.maxHistoryTurns)
             putBoolean("enable_latest_reminder", draft.enableLatestReminder)
             putBoolean("auto_generate_title", draft.autoGenerateTitle)
-            putString("custom_chat_system_prompt", draft.customChatSystemPrompt.trim())
-            putString("custom_work_system_prompt", draft.customWorkSystemPrompt.trim())
+            putString("custom_chat_system_prompt", chatPromptToSave)
+            putString("custom_work_system_prompt", workPromptToSave)
+            putString("work_tools_config_json", draft.workToolsConfig.toJson().toString())
             putBoolean("allow_sdcard", draft.allowSdcardReadonly)
             putInt("shell_timeout_sec", draft.shellTimeoutSec)
             apply()
         }
-        CoreProtocol.AppLogger.info("Settings", "Saved settings: model=$effectiveModel baseUrl=$normalizedBaseUrl maxRounds=${draft.maxToolRounds}")
+        CoreProtocol.AppLogger.info(
+            "Settings",
+            "Saved settings: model=$effectiveModel baseUrl=$normalizedBaseUrl shell=${draft.workToolsConfig.shellExec} device=${draft.workToolsConfig.deviceControl} enabledTools=${draft.workToolsConfig.enabledToolNames().size}"
+        )
     }
 
     fun discoverCapabilities(overrideKey: String? = null, overrideBaseUrl: String? = null) {
@@ -605,7 +873,7 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
             _uiState.update { it.copy(discoverySummary = "请先填写 API Key") }
             return
         }
-        _uiState.update { it.copy(isDiscovering = true, discoverySummary = "正在探测上游接口与本地工具链...") }
+        _uiState.update { it.copy(isDiscovering = true, discoverySummary = "正在探测上游接口与多模态能力...") }
         viewModelScope.launch {
             val raw = withContext(Dispatchers.IO) {
                 FluorineBridge.discoverCapabilitiesJson(
@@ -617,6 +885,7 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
             }
             val parsed = runCatching { JSONObject(raw) }.getOrNull()
             val ok = parsed?.optBoolean("ok", false) == true
+            val discoveredMap = CoreProtocol.DEFAULT_MODEL_CAPABILITIES.toMutableMap()
             val summary = if (ok) {
                 val models = parsed?.optJSONArray("models")
                 val modelList = buildList {
@@ -624,17 +893,43 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
                         for (i in 0 until models.length()) add(models.optString(i))
                     }
                 }
-                val toolsCount = parsed?.optJSONArray("local_tools")?.length() ?: 15
-                "连接成功 ($baseUrl) · 可用模型: ${modelList.joinToString(", ").ifEmpty { "默认" }} · 本地工具: $toolsCount 个"
+                val detailArr = parsed?.optJSONArray("models_detail")
+                if (detailArr != null) {
+                    for (i in 0 until detailArr.length()) {
+                        val d = detailArr.optJSONObject(i) ?: continue
+                        val id = d.optString("id", "").trim()
+                        if (id.isEmpty()) continue
+                        val mods = mutableListOf<String>()
+                        val mArr = d.optJSONArray("input_modalities")
+                        if (mArr != null) {
+                            for (j in 0 until mArr.length()) mods.add(mArr.optString(j))
+                        }
+                        discoveredMap[id] = ModelCapabilityInfo(
+                            id = id,
+                            name = d.optString("name", id),
+                            contextWindow = d.optInt("context_window", 0),
+                            maxOutputTokens = d.optInt("max_output_tokens", 0),
+                            inputModalities = mods
+                        )
+                    }
+                }
+                val enabledCount = _uiState.value.workToolsConfig.enabledToolNames().size
+                "连接成功 ($baseUrl) · 可用模型: ${modelList.joinToString(", ").ifEmpty { "默认" }} · 当前已启用工具: $enabledCount 个"
             } else {
                 "探测失败: ${parsed?.optString("error", raw)}"
             }
-            _uiState.update { it.copy(isDiscovering = false, discoverySummary = summary) }
+            _uiState.update {
+                it.copy(
+                    isDiscovering = false,
+                    discoverySummary = summary,
+                    discoveredCapabilities = discoveredMap
+                )
+            }
         }
     }
 
     // ========================================================================
-    // Workspace File Export / Preview / Management (Requirement #1)
+    // Workspace File Export / Preview / Management
     // ========================================================================
 
     fun openWorkspaceFilesDialog(open: Boolean) {
@@ -651,14 +946,20 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
 
     fun resolveWorkspaceFile(artifact: WorkspaceFileArtifact): File {
         val rel = artifact.relativePath.trim().removePrefix("./")
-        return File(workspaceDir, rel)
+        val wsCanonical = workspaceDir.canonicalFile
+        val candidate = File(wsCanonical, rel).canonicalFile
+        val wsPrefix = wsCanonical.path
+        if (candidate.path != wsPrefix && !candidate.path.startsWith(wsPrefix + File.separator)) {
+            throw SecurityException("工作区路径非法越界: ${artifact.relativePath}")
+        }
+        return candidate
     }
 
     fun previewWorkspaceFile(artifact: WorkspaceFileArtifact) {
         viewModelScope.launch(Dispatchers.IO) {
-            val file = resolveWorkspaceFile(artifact)
-            val content = if (!file.exists() || !file.isFile) {
-                "[文件不存在: ${artifact.relativePath}]"
+            val file = runCatching { resolveWorkspaceFile(artifact) }.getOrNull()
+            val content = if (file == null || !file.exists() || !file.isFile) {
+                "[文件不存在或路径受限: ${artifact.relativePath}]"
             } else if (file.length() > 256 * 1024) {
                 runCatching {
                     file.inputStream().bufferedReader(Charsets.UTF_8).use {
@@ -673,7 +974,7 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
             }
             _uiState.update {
                 it.copy(
-                    previewArtifact = artifact.copy(bytes = if (file.exists()) file.length() else artifact.bytes),
+                    previewArtifact = artifact.copy(bytes = if (file != null && file.exists()) file.length() else artifact.bytes),
                     previewArtifactContent = content
                 )
             }
@@ -686,8 +987,8 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
 
     fun deleteWorkspaceFile(artifact: WorkspaceFileArtifact) {
         viewModelScope.launch(Dispatchers.IO) {
-            val file = resolveWorkspaceFile(artifact)
-            if (file.exists() && file.canonicalPath.startsWith(workspaceDir.canonicalPath)) {
+            val file = runCatching { resolveWorkspaceFile(artifact) }.getOrNull()
+            if (file != null && file.exists() && file.canonicalPath.startsWith(workspaceDir.canonicalPath)) {
                 file.delete()
                 CoreProtocol.AppLogger.info("Workspace", "Deleted workspace file: ${artifact.relativePath}")
             }
@@ -740,7 +1041,7 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
     }
 
     // ========================================================================
-    // Chat History & App Log Export / Import (Requirement #13)
+    // Chat History & App Log Export / Import
     // ========================================================================
 
     fun writeTextContentToUri(
@@ -799,6 +1100,11 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
             session.chatMessages.forEach { msg ->
                 val roleTitle = if (msg.role == "user") "### 用户 (User)" else "### Fluorine (Assistant)"
                 sb.append(roleTitle).append("\n\n")
+                if (msg.attachments.isNotEmpty()) {
+                    sb.append("附件：")
+                        .append(msg.attachments.joinToString(", ") { it.name })
+                        .append("\n\n")
+                }
                 if (msg.thinking.isNotBlank()) {
                     sb.append("<details><summary>深度思考过程</summary>\n\n```text\n")
                         .append(msg.thinking)
@@ -814,6 +1120,9 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
                     sb.append("```\n</details>\n\n")
                 }
                 sb.append(msg.text).append("\n\n")
+                if (msg.incompleteNotice.isNotBlank()) {
+                    sb.append("> 注意：").append(msg.incompleteNotice).append("\n\n")
+                }
                 if (msg.usageText.isNotBlank()) {
                     sb.append("> ").append(msg.usageText).append("\n\n")
                 }
@@ -827,6 +1136,10 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
         sourceUri: Uri,
         onComplete: (Boolean, String) -> Unit
     ) {
+        if (_uiState.value.isBusy) {
+            onComplete(false, "正在生成回复，请停止后再导入")
+            return
+        }
         viewModelScope.launch(Dispatchers.IO) {
             val res = runCatching {
                 val raw = context.contentResolver.openInputStream(sourceUri)
@@ -856,10 +1169,30 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
                 res.fold(
                     onSuccess = { importedList ->
                         val s = _uiState.value
-                        val existingIds = s.sessions.map { it.id }.toSet()
-                        val deduped = importedList.map { item ->
-                            if (item.id in existingIds) item.copy(id = UUID.randomUUID().toString()) else item
+                        if (s.isBusy) {
+                            onComplete(false, "正在生成回复，请停止后再导入")
+                            return@fold
                         }
+                        val seenSessionIds = s.sessions.map { it.id }.toMutableSet()
+                        val seenMsgIds = s.sessions.flatMap { sess -> sess.chatMessages.map { it.id } }.toMutableSet()
+
+                        val deduped = importedList.map { item ->
+                            val newSessionId = if (!seenSessionIds.add(item.id) || item.id.isBlank()) {
+                                UUID.randomUUID().toString().also { seenSessionIds.add(it) }
+                            } else {
+                                item.id
+                            }
+                            val dedupedMsgs = item.chatMessages.map { msg ->
+                                val newMsgId = if (!seenMsgIds.add(msg.id) || msg.id.isBlank()) {
+                                    UUID.randomUUID().toString().also { seenMsgIds.add(it) }
+                                } else {
+                                    msg.id
+                                }
+                                msg.copy(id = newMsgId)
+                            }
+                            item.copy(id = newSessionId, chatMessages = dedupedMsgs)
+                        }
+
                         val merged = deduped + s.sessions
                         val active = merged.first()
                         _uiState.update {
@@ -870,6 +1203,7 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
                                 mode = active.mode,
                                 chatMessages = active.chatMessages,
                                 contextHistory = active.contextHistory,
+                                pendingAttachments = emptyList(),
                                 transientNotice = "成功导入 ${deduped.size} 个会话"
                             )
                         }
@@ -893,15 +1227,31 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
     }
 
     // ========================================================================
-    // Prompt Execution: Chat & Autonomous Agent Work Mode (Requirements #8, #12)
+    // Prompt Execution: Live Streaming + Multimodal Upload + Stop + Safe Retention
     // ========================================================================
 
-    fun submitPrompt(overridePrompt: String? = null) {
-        val state = _uiState.value
-        val prompt = (overridePrompt ?: state.promptInput).trim()
-        if (prompt.isEmpty() || state.isBusy) return
+    fun stopGeneration() {
+        val reqId = _uiState.value.activeRequestId
+        if (reqId != 0L) {
+            FluorineBridge.cancelStream(reqId)
+            _uiState.update {
+                it.copy(
+                    taskStatusText = "正在停止...",
+                    transientNotice = "已发送停止信号"
+                )
+            }
+        }
+    }
 
-        if (state.apiKey.isBlank()) {
+    fun submitPrompt(overridePrompt: String? = null) {
+        val snapshot = _uiState.value
+        if (snapshot.isBusy) return
+
+        val rawPrompt = (overridePrompt ?: snapshot.promptInput).trim()
+        val attachmentsToUse = if (overridePrompt == null) snapshot.pendingAttachments else emptyList()
+        if (rawPrompt.isEmpty() && attachmentsToUse.isEmpty()) return
+
+        if (snapshot.apiKey.isBlank()) {
             _uiState.update {
                 it.copy(
                     showSettingsDialog = true,
@@ -911,236 +1261,374 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
             return
         }
 
-        val userMsg = ChatMessage(
-            id = UUID.randomUUID().toString(),
-            role = "user",
-            text = prompt,
-            tags = listOf(if (state.mode == "work") "Work Agent" else "Chat")
-        )
-        val newTitle = if (state.autoGenerateTitle &&
-            state.chatMessages.isEmpty() &&
-            (state.conversationTitle == "新对话" || state.conversationTitle.isBlank())
-        ) {
-            prompt.replace('\n', ' ').take(24)
+        if (attachmentsToUse.isNotEmpty() && !CoreProtocol.supportsMultimodal(snapshot.model, snapshot.discoveredCapabilities)) {
+            notifyMultimodalUnavailable()
+            return
+        }
+
+        val effectivePrompt = if (rawPrompt.isEmpty() && attachmentsToUse.isNotEmpty()) {
+            "请结合我上传的文件/图片内容进行分析与回答。"
         } else {
-            state.conversationTitle
+            rawPrompt
         }
 
-        val updatedMessages = state.chatMessages + userMsg
-        _uiState.update {
-            it.copy(
-                conversationTitle = newTitle,
-                promptInput = "",
-                isBusy = true,
-                chatMessages = updatedMessages
-            )
-        }
-        syncActiveSessionState(title = newTitle, chatMessages = updatedMessages)
+        val targetSessionId = snapshot.activeSessionId
+        val targetMode = snapshot.mode
+        val isWork = targetMode == "work"
+        val requestId = FluorineBridge.nextRequestId()
 
-        viewModelScope.launch {
+        activeExecutionJob = viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    isBusy = true,
+                    activeRequestId = requestId,
+                    taskStatusText = if (attachmentsToUse.isNotEmpty()) "准备上传附件..." else "正在请求模型..."
+                )
+            }
+
             try {
-                if (state.mode == "work") {
-                    executeAutonomousWorkTurn(prompt)
+                // Step 1: Upload document/text attachments (and >4 MiB images) via DeepSeek Files API
+                val preparedAttachments = mutableListOf<ChatAttachment>()
+                for (att in attachmentsToUse) {
+                    val needsFilesApi = att.kind != "image" || att.sizeBytes > 4L * 1024L * 1024L
+                    if (needsFilesApi && att.fileId.isBlank()) {
+                        _uiState.update { it.copy(taskStatusText = "正在上传解析：${att.name}") }
+                        val uploadRaw = withContext(Dispatchers.IO) {
+                            FluorineBridge.uploadAttachmentFileJson(
+                                apiKey = snapshot.apiKey,
+                                baseUrl = snapshot.baseUrl,
+                                attachment = att,
+                                connectTimeoutSec = snapshot.connectTimeoutSec,
+                                readTimeoutSec = snapshot.readTimeoutSec.coerceAtLeast(150)
+                            )
+                        }
+                        val upObj = runCatching { JSONObject(uploadRaw) }.getOrNull()
+                        if (upObj?.optBoolean("ok", false) != true) {
+                            val errMsg = upObj?.optString("error", uploadRaw) ?: "文件上传失败"
+                            _uiState.update {
+                                it.copy(
+                                    isBusy = false,
+                                    activeRequestId = 0L,
+                                    taskStatusText = "附件上传失败",
+                                    transientNotice = "附件 ${att.name} 上传失败：$errMsg"
+                                )
+                            }
+                            return@launch
+                        }
+                        preparedAttachments.add(att.copy(fileId = upObj.optString("id", "")))
+                    } else {
+                        preparedAttachments.add(att)
+                    }
+                }
+
+                // Step 2: Commit user message + live streaming placeholder assistant message
+                val userMsg = ChatMessage(
+                    id = UUID.randomUUID().toString(),
+                    role = "user",
+                    text = effectivePrompt,
+                    tags = buildList {
+                        add(if (isWork) "Work Agent" else "Chat")
+                        if (preparedAttachments.isNotEmpty()) add("附件 ×${preparedAttachments.size}")
+                    },
+                    attachments = preparedAttachments
+                )
+
+                val assistantMsgId = UUID.randomUUID().toString()
+                val baseTags = buildList {
+                    if (isWork) add("Work Agent")
+                    add(snapshot.model)
+                    if (snapshot.useThinking && snapshot.thinkingMode != "disabled") {
+                        add("Thinking · ${snapshot.effort}")
+                    }
+                    if (snapshot.useWeb) add("Web")
+                }
+                val liveAssistantPlaceholder = ChatMessage(
+                    id = assistantMsgId,
+                    role = "assistant",
+                    text = "",
+                    tags = baseTags
+                )
+
+                val newTitle = if (snapshot.autoGenerateTitle &&
+                    snapshot.chatMessages.isEmpty() &&
+                    (snapshot.conversationTitle == "新对话" || snapshot.conversationTitle == "新 Work 任务" || snapshot.conversationTitle.isBlank())
+                ) {
+                    effectivePrompt.replace('\n', ' ').take(24)
                 } else {
-                    executeChatTurn(prompt)
+                    snapshot.conversationTitle
+                }
+
+                val messagesWithPlaceholder = snapshot.chatMessages + userMsg + liveAssistantPlaceholder
+                if (overridePrompt == null) {
+                    _uiState.update {
+                        it.copy(
+                            promptInput = "",
+                            pendingAttachments = emptyList(),
+                            taskStatusText = if (isWork) "Agent 正在自主推理与调度本地工具..." else "模型流式响应中...",
+                            toolsText = ""
+                        )
+                    }
+                }
+                updateSessionById(
+                    targetSessionId = targetSessionId,
+                    title = newTitle,
+                    chatMessages = messagesWithPlaceholder,
+                    persist = true
+                )
+
+                // Step 3: Build immutable payload from launching snapshot
+                val messagesArr = buildHistoryMessagesJson(
+                    history = snapshot.contextHistory,
+                    maxHistoryTurns = snapshot.maxHistoryTurns,
+                    preserveToolSubturns = isWork
+                )
+                if (snapshot.enableLatestReminder) {
+                    messagesArr.put(
+                        JSONObject()
+                            .put("role", "latest_reminder")
+                            .put("content", CoreProtocol.buildLatestReminder(Date(), "App"))
+                    )
+                }
+                val userReqMsg = JSONObject()
+                    .put("role", "user")
+                    .put("content", effectivePrompt)
+                if (preparedAttachments.isNotEmpty()) {
+                    val attArr = JSONArray()
+                    for (att in preparedAttachments) {
+                        attArr.put(
+                            JSONObject()
+                                .put("kind", att.kind)
+                                .put("name", att.name)
+                                .put("mime_type", att.mimeType)
+                                .put("local_path", att.localPath)
+                                .put("file_id", att.fileId)
+                        )
+                    }
+                    userReqMsg.put("attachments", attArr)
+                }
+                messagesArr.put(userReqMsg)
+
+                val reqObj = buildEngineRequestJson(
+                    state = snapshot,
+                    stage = if (isWork) "work" else "chat",
+                    useLocalTools = isWork,
+                    systemPrompt = if (isWork) snapshot.customWorkSystemPrompt else snapshot.customChatSystemPrompt,
+                    messagesArr = messagesArr
+                )
+
+                // Step 4: Execute streaming loop and reflect incremental updates live on UI
+                val liveThinkingSb = StringBuilder()
+                val liveContentSb = StringBuilder()
+                val liveTools = mutableListOf<LocalToolCallRecord>()
+                var liveSources = emptyList<com.uronic0x.fluorine.protocol.SearchSource>()
+
+                fun pushLiveMessageUpdate() {
+                    val targetSess = _uiState.value.sessions.firstOrNull { it.id == targetSessionId } ?: return
+                    val updatedMsgs = targetSess.chatMessages.map { m ->
+                        if (m.id == assistantMsgId) {
+                            m.copy(
+                                thinking = liveThinkingSb.toString(),
+                                text = liveContentSb.toString(),
+                                localToolCalls = liveTools.toList(),
+                                sources = liveSources
+                            )
+                        } else {
+                            m
+                        }
+                    }
+                    updateSessionById(
+                        targetSessionId = targetSessionId,
+                        chatMessages = updatedMsgs,
+                        persist = false
+                    )
+                }
+
+                val rawResp = withContext(Dispatchers.IO) {
+                    FluorineBridge.chatCompleteStreamingJson(
+                        requestId = requestId,
+                        requestJson = reqObj.toString(),
+                        onEvent = { ev ->
+                            viewModelScope.launch(Dispatchers.Main) {
+                                when (ev) {
+                                    is StreamUiEvent.ThinkingDelta -> {
+                                        liveThinkingSb.append(ev.delta)
+                                        pushLiveMessageUpdate()
+                                    }
+                                    is StreamUiEvent.ContentDelta -> {
+                                        liveContentSb.append(ev.delta)
+                                        pushLiveMessageUpdate()
+                                    }
+                                    is StreamUiEvent.Status -> {
+                                        _uiState.update { it.copy(taskStatusText = ev.text) }
+                                    }
+                                    is StreamUiEvent.ToolRecord -> {
+                                        liveTools.add(ev.record)
+                                        _uiState.update { it.copy(toolsText = formatToolCallsLog(liveTools)) }
+                                        pushLiveMessageUpdate()
+                                    }
+                                    is StreamUiEvent.SourcesUpdated -> {
+                                        liveSources = ev.sources
+                                        pushLiveMessageUpdate()
+                                    }
+                                }
+                            }
+                        }
+                    )
+                }
+
+                val parsed = CoreProtocol.parseEngineTurnResult(rawResp)
+
+                val finalThinking = parsed.thinking.ifBlank { liveThinkingSb.toString() }
+                val finalContent = parsed.content.ifBlank { liveContentSb.toString() }
+                val finalTools = if (parsed.localToolCalls.isNotEmpty()) parsed.localToolCalls else liveTools.toList()
+                val finalSources = if (parsed.sources.isNotEmpty()) parsed.sources else liveSources
+                val noticeText = parsed.incompleteNotice.ifBlank {
+                    if (!parsed.ok) parsed.error else ""
+                }
+
+                val hasPartialOutput = finalContent.isNotBlank() ||
+                    finalThinking.isNotBlank() ||
+                    finalTools.isNotEmpty() ||
+                    finalSources.isNotEmpty()
+
+                val displayText = when {
+                    finalContent.isNotBlank() -> finalContent
+                    !parsed.ok && !hasPartialOutput -> "错误：${parsed.error.ifBlank { "请求失败" }}"
+                    else -> ""
+                }
+
+                val finalTags = buildList {
+                    addAll(baseTags)
+                    if (finalTools.isNotEmpty()) add("Tools ×${finalTools.size}")
+                    if (!parsed.ok && parsed.finishReason == "content_filter") add("内容审核")
+                    else if (!parsed.ok) add("未完整结束")
+                }
+
+                val targetSess = _uiState.value.sessions.firstOrNull { it.id == targetSessionId }
+                val currentMsgs = targetSess?.chatMessages ?: messagesWithPlaceholder
+                val finalMsgs = currentMsgs.map { m ->
+                    if (m.id == assistantMsgId) {
+                        m.copy(
+                            text = displayText,
+                            tags = finalTags,
+                            thinking = finalThinking,
+                            sources = finalSources,
+                            citations = parsed.citations,
+                            localToolCalls = finalTools,
+                            usageText = parsed.usageText,
+                            incompleteNotice = noticeText,
+                            isError = !parsed.ok && !hasPartialOutput
+                        )
+                    } else {
+                        m
+                    }
+                }
+
+                val baseHistory = targetSess?.contextHistory ?: snapshot.contextHistory
+                val updatedHistory = if (parsed.ok || finalContent.isNotBlank()) {
+                    baseHistory +
+                        ContextTurn("user", effectivePrompt, attachments = preparedAttachments) +
+                        ContextTurn(
+                            role = "assistant",
+                            content = finalContent,
+                            subturnMessages = parsed.subturnMessages,
+                            reasoningContent = finalThinking
+                        )
+                } else {
+                    baseHistory
+                }
+
+                updateSessionById(
+                    targetSessionId = targetSessionId,
+                    chatMessages = finalMsgs,
+                    contextHistory = updatedHistory,
+                    persist = true
+                )
+
+                val toolSummaryLog = formatToolCallsLog(finalTools)
+                val statusSummary = when {
+                    !parsed.ok -> noticeText.ifBlank { "执行中断" }
+                    isWork && finalTools.isEmpty() -> "完成（直接推理，未调用本地工具）"
+                    isWork -> "完成 · 共执行 ${finalTools.size} 次本地工具调用（${parsed.rounds} 轮）"
+                    else -> "完成"
+                }
+
+                _uiState.update {
+                    it.copy(
+                        taskStatusText = statusSummary,
+                        toolsText = toolSummaryLog,
+                        transientNotice = if (!parsed.ok && noticeText.isNotBlank()) noticeText else it.transientNotice
+                    )
                 }
             } finally {
                 val files = withContext(Dispatchers.IO) {
                     CoreProtocol.listWorkspaceFiles(workspaceDir)
                 }
-                _uiState.update { it.copy(isBusy = false, workspaceFiles = files) }
+                _uiState.update {
+                    it.copy(
+                        isBusy = false,
+                        activeRequestId = 0L,
+                        workspaceFiles = files
+                    )
+                }
             }
         }
     }
 
-    private suspend fun executeChatTurn(prompt: String) {
-        val state = _uiState.value
-        val messagesArr = buildHistoryMessagesJson(
-            history = state.contextHistory,
-            maxHistoryTurns = state.maxHistoryTurns,
-            preserveToolSubturns = false
-        )
-        if (state.enableLatestReminder) {
-            messagesArr.put(
-                JSONObject()
-                    .put("role", "latest_reminder")
-                    .put("content", CoreProtocol.buildLatestReminder(Date(), "App"))
-            )
-        }
-        messagesArr.put(JSONObject().put("role", "user").put("content", prompt))
-
-        val reqObj = buildEngineRequestJson(
-            state = state,
-            stage = "chat",
-            useLocalTools = false,
-            systemPrompt = state.customChatSystemPrompt,
-            messagesArr = messagesArr
-        )
-
-        val rawResp = withContext(Dispatchers.IO) {
-            FluorineBridge.chatCompleteJson(reqObj.toString())
-        }
-        val parsed = CoreProtocol.parseEngineTurnResult(rawResp)
-        if (!parsed.ok) {
-            appendErrorAssistantMessage(parsed.error.ifBlank { "请求失败" })
-            return
-        }
-
-        val tags = buildList {
-            add(state.model)
-            if (state.useThinking && state.thinkingMode != "disabled") add("Thinking · ${state.effort}")
-            if (state.useWeb) add("Web")
-        }
-        val assistantMsg = ChatMessage(
-            id = UUID.randomUUID().toString(),
-            role = "assistant",
-            text = parsed.content.ifBlank { "（无正文输出）" },
-            tags = tags,
-            thinking = parsed.thinking,
-            sources = parsed.sources,
-            citations = parsed.citations,
-            localToolCalls = parsed.localToolCalls,
-            usageText = parsed.usageText
-        )
-        val newMessages = _uiState.value.chatMessages + assistantMsg
-        val newHistory = _uiState.value.contextHistory +
-            ContextTurn("user", prompt) +
-            ContextTurn("assistant", parsed.content)
-
-        syncActiveSessionState(
-            chatMessages = newMessages,
-            contextHistory = newHistory
-        )
-    }
-
     /**
-     * Autonomous Agent Work Mode (Requirements #8 & #12):
-     * - No rigid 4-step workflow. Provides all deterministic + Android/Termux harness tools
-     *   (plus optional web_search) in a single unified agent loop and lets the model decide
-     *   how to analyze, plan, and call tools.
-     * - Strict DeepSeek Official Prefix Cache Hit compliance:
-     *   1. Static `system` prompt + static `tools` array across turns.
-     *   2. Historical `ContextTurn`s preserve `subturnMessages` (`assistant(tool_calls)` + `role: "tool"`,
-     *      with `reasoning_content` stripped) so Turn 2+ sends the exact token prefix from Turn 1's
-     *      tool rounds and hits the server KV cache (`prompt_cache_hit_tokens`).
+     * Atomic turn-group slicing:
+     * Preserves `ContextTurn(user) + ContextTurn(assistant)` pairs cleanly without breaking
+     * tool sub-turns (`assistant(tool_calls)` -> `tool` replies) or dropping `reasoning_content`.
      */
-    private suspend fun executeAutonomousWorkTurn(prompt: String) {
-        val state = _uiState.value
-        _uiState.update {
-            it.copy(
-                taskStatusText = "Agent 正在自主推理与调度本地工具...",
-                toolsText = ""
-            )
-        }
-
-        val messagesArr = buildHistoryMessagesJson(
-            history = state.contextHistory,
-            maxHistoryTurns = state.maxHistoryTurns,
-            preserveToolSubturns = true
-        )
-        if (state.enableLatestReminder) {
-            messagesArr.put(
-                JSONObject()
-                    .put("role", "latest_reminder")
-                    .put("content", CoreProtocol.buildLatestReminder(Date(), "App"))
-            )
-        }
-        messagesArr.put(JSONObject().put("role", "user").put("content", prompt))
-
-        val reqObj = buildEngineRequestJson(
-            state = state,
-            stage = "work",
-            useLocalTools = true,
-            systemPrompt = state.customWorkSystemPrompt,
-            messagesArr = messagesArr
-        )
-
-        val rawResp = withContext(Dispatchers.IO) {
-            FluorineBridge.chatCompleteJson(reqObj.toString())
-        }
-        val parsed = CoreProtocol.parseEngineTurnResult(rawResp)
-        if (!parsed.ok) {
-            _uiState.update { it.copy(taskStatusText = "执行中断") }
-            appendErrorAssistantMessage(parsed.error.ifBlank { "Work Agent 执行失败" })
-            return
-        }
-
-        val toolSummaryLog = formatToolCallsLog(parsed.localToolCalls)
-        val statusSummary = if (parsed.localToolCalls.isEmpty()) {
-            "完成（直接推理，未调用本地工具）"
-        } else {
-            "完成 · 共执行 ${parsed.localToolCalls.size} 次本地工具调用（${parsed.rounds} 轮）"
-        }
-
-        _uiState.update {
-            it.copy(
-                taskStatusText = statusSummary,
-                toolsText = toolSummaryLog
-            )
-        }
-
-        val tags = buildList {
-            add("Work Agent")
-            add(state.model)
-            if (parsed.localToolCalls.isNotEmpty()) add("Tools ×${parsed.localToolCalls.size}")
-            if (state.useWeb) add("Web")
-        }
-
-        val assistantMsg = ChatMessage(
-            id = UUID.randomUUID().toString(),
-            role = "assistant",
-            text = parsed.content.ifBlank { "（无正文输出）" },
-            tags = tags,
-            thinking = parsed.thinking,
-            sources = parsed.sources,
-            citations = parsed.citations,
-            localToolCalls = parsed.localToolCalls,
-            usageText = parsed.usageText
-        )
-
-        val newMessages = _uiState.value.chatMessages + assistantMsg
-        val newHistory = _uiState.value.contextHistory +
-            ContextTurn("user", prompt) +
-            ContextTurn(
-                role = "assistant",
-                content = parsed.content,
-                subturnMessages = parsed.subturnMessages
-            )
-
-        syncActiveSessionState(
-            chatMessages = newMessages,
-            contextHistory = newHistory
-        )
-    }
-
     private fun buildHistoryMessagesJson(
         history: List<ContextTurn>,
         maxHistoryTurns: Int,
         preserveToolSubturns: Boolean
     ): JSONArray {
         val arr = JSONArray()
-        val sliced = history.takeLast(maxHistoryTurns.coerceIn(2, 100))
+        val maxEntries = maxHistoryTurns.coerceIn(2, 100)
+        var startIdx = (history.size - maxEntries).coerceAtLeast(0)
+        // Align startIdx so the slice starts on a "user" turn boundary
+        while (startIdx < history.size && history[startIdx].role != "user") {
+            startIdx++
+        }
+        val sliced = if (startIdx < history.size) history.subList(startIdx, history.size) else emptyList()
+
         for (turn in sliced) {
             if (turn.role == "user") {
-                arr.put(
-                    JSONObject()
-                        .put("role", "user")
-                        .put("content", turn.content)
-                )
+                val userObj = JSONObject()
+                    .put("role", "user")
+                    .put("content", turn.content)
+                if (turn.attachments.isNotEmpty()) {
+                    val attArr = JSONArray()
+                    for (att in turn.attachments) {
+                        attArr.put(
+                            JSONObject()
+                                .put("kind", att.kind)
+                                .put("name", att.name)
+                                .put("mime_type", att.mimeType)
+                                .put("local_path", att.localPath)
+                                .put("file_id", att.fileId)
+                        )
+                    }
+                    userObj.put("attachments", attArr)
+                }
+                arr.put(userObj)
             } else if (turn.role == "assistant") {
                 if (preserveToolSubturns && turn.subturnMessages.isNotEmpty()) {
                     for (rawSub in turn.subturnMessages) {
                         val subObj = runCatching { JSONObject(rawSub) }.getOrNull() ?: continue
-                        subObj.remove("reasoning_content")
                         arr.put(subObj)
                     }
                 }
                 if (turn.content.isNotBlank()) {
-                    arr.put(
-                        JSONObject()
-                            .put("role", "assistant")
-                            .put("content", turn.content)
-                    )
+                    val aObj = JSONObject()
+                        .put("role", "assistant")
+                        .put("content", turn.content)
+                    if (turn.reasoningContent.isNotEmpty()) {
+                        aObj.put("reasoning_content", turn.reasoningContent)
+                    }
+                    arr.put(aObj)
                 }
             }
         }
@@ -1167,6 +1655,7 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
             .put("use_thinking", state.useThinking)
             .put("thinking_mode", state.thinkingMode)
             .put("use_local_tools", useLocalTools)
+            .put("tool_config", state.workToolsConfig.toJson())
             .put("effort", state.effort)
             .put("max_tokens", state.maxTokens)
             .put("enable_temperature", state.enableTemperature)
@@ -1183,17 +1672,5 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
         return calls.joinToString("\n\n") { tc ->
             "[#${tc.round}] ${tc.name}(${tc.arguments})\n→ ${tc.output}"
         }
-    }
-
-    private fun appendErrorAssistantMessage(errorText: String) {
-        val errMsg = ChatMessage(
-            id = UUID.randomUUID().toString(),
-            role = "assistant",
-            text = "错误：$errorText",
-            tags = listOf("Error"),
-            isError = true
-        )
-        val newMessages = _uiState.value.chatMessages + errMsg
-        syncActiveSessionState(chatMessages = newMessages, touchUpdatedAt = false)
     }
 }

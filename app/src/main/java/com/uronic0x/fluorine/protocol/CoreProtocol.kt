@@ -13,6 +13,140 @@ data class ModelOption(val id: String, val label: String)
 data class EffortOption(val id: String, val label: String)
 data class MaxTokenOption(val value: Int, val label: String)
 
+data class ModelCapabilityInfo(
+    val id: String,
+    val name: String = "",
+    val contextWindow: Int = 0,
+    val maxOutputTokens: Int = 0,
+    val inputModalities: List<String> = emptyList()
+)
+
+data class ChatAttachment(
+    val id: String,
+    val name: String,
+    val mimeType: String,
+    val kind: String, // "image" | "document" | "text"
+    val localPath: String,
+    val sizeBytes: Long = 0L,
+    val fileId: String = "",
+    val parsePurpose: String = "user_data" // "user_data" | "text_recognition" | "rich_layout_recognition"
+)
+
+data class ToolDescriptor(
+    val name: String,
+    val category: String,
+    val label: String
+)
+
+data class WorkToolsConfig(
+    val deterministic: Boolean = true,
+    val workspaceRead: Boolean = true,
+    val workspaceWrite: Boolean = true,
+    val git: Boolean = true,
+    val shellExec: Boolean = false,
+    val deviceControl: Boolean = false,
+    val disabledTools: Set<String> = emptySet()
+) {
+    fun enabledToolNames(): Set<String> {
+        val out = linkedSetOf<String>()
+        if (deterministic) out.addAll(DETERMINISTIC_TOOL_NAMES)
+        if (workspaceRead) out.addAll(WORKSPACE_READ_TOOL_NAMES)
+        if (workspaceWrite) out.addAll(WORKSPACE_WRITE_TOOL_NAMES)
+        if (git) out.addAll(GIT_TOOL_NAMES)
+        if (shellExec) out.addAll(SHELL_TOOL_NAMES)
+        if (deviceControl) out.addAll(DEVICE_CONTROL_TOOL_NAMES)
+        val canonicalDisabled = disabledTools.mapTo(mutableSetOf()) { raw ->
+            when (raw) {
+                "calc_eval" -> "calc"
+                "stats_summary" -> "stats"
+                else -> raw
+            }
+        }
+        out.removeAll(canonicalDisabled)
+        return out
+    }
+
+    fun isToolEnabled(rawName: String): Boolean {
+        val canonical = when (rawName) {
+            "calc_eval" -> "calc"
+            "stats_summary" -> "stats"
+            else -> rawName
+        }
+        return canonical in enabledToolNames()
+    }
+
+    fun toJson(): JSONObject = JSONObject()
+        .put("deterministic", deterministic)
+        .put("workspace_read", workspaceRead)
+        .put("workspace_write", workspaceWrite)
+        .put("git", git)
+        .put("shell_exec", shellExec)
+        .put("device_control", deviceControl)
+        .put("disabled_tools", JSONArray(disabledTools.sorted()))
+
+    companion object {
+        val DETERMINISTIC_TOOL_NAMES = setOf(
+            "calc", "stats", "unit_convert", "date_calc", "text_metrics",
+            "json_query", "csv_summary", "text_diff", "encode_hash"
+        )
+        val WORKSPACE_READ_TOOL_NAMES = setOf("fs_list", "fs_read", "fs_search")
+        val WORKSPACE_WRITE_TOOL_NAMES = setOf("fs_write", "fs_edit")
+        val GIT_TOOL_NAMES = setOf("git_cmd")
+        val SHELL_TOOL_NAMES = setOf("shell_exec")
+        val DEVICE_CONTROL_TOOL_NAMES = setOf("termux_api", "self_adb")
+
+        val ALL_DESCRIPTORS = listOf(
+            ToolDescriptor("calc", "deterministic", "calc · 数学表达式计算"),
+            ToolDescriptor("stats", "deterministic", "stats · 描述性统计"),
+            ToolDescriptor("unit_convert", "deterministic", "unit_convert · 单位换算"),
+            ToolDescriptor("date_calc", "deterministic", "date_calc · 日期与工作日"),
+            ToolDescriptor("text_metrics", "deterministic", "text_metrics · 字符与词数统计"),
+            ToolDescriptor("json_query", "deterministic", "json_query · JSON 查询与校验"),
+            ToolDescriptor("csv_summary", "deterministic", "csv_summary · CSV 汇总统计"),
+            ToolDescriptor("text_diff", "deterministic", "text_diff · 文本逐行比对"),
+            ToolDescriptor("encode_hash", "deterministic", "encode_hash · 编解码与哈希"),
+            ToolDescriptor("fs_list", "workspace_read", "fs_list · 列举工作区目录"),
+            ToolDescriptor("fs_read", "workspace_read", "fs_read · 读取工作区文本"),
+            ToolDescriptor("fs_search", "workspace_read", "fs_search · 搜索工作区文本"),
+            ToolDescriptor("fs_write", "workspace_write", "fs_write · 写入或追加文件"),
+            ToolDescriptor("fs_edit", "workspace_write", "fs_edit · 局部替换编辑文件"),
+            ToolDescriptor("git_cmd", "git", "git_cmd · Git 仓库检查"),
+            ToolDescriptor("shell_exec", "shell_exec", "shell_exec · 任意 Shell 命令"),
+            ToolDescriptor("termux_api", "device_control", "termux_api · Termux 设备接口"),
+            ToolDescriptor("self_adb", "device_control", "self_adb · Android 本机诊断与控制")
+        )
+
+        fun fromJson(obj: JSONObject?): WorkToolsConfig {
+            if (obj == null) return WorkToolsConfig()
+            val disabled = mutableSetOf<String>()
+            val arr = obj.optJSONArray("disabled_tools")
+            if (arr != null) {
+                for (i in 0 until arr.length()) {
+                    val s = arr.optString(i, "").trim()
+                    if (s.isNotEmpty()) disabled.add(s)
+                }
+            }
+            return WorkToolsConfig(
+                deterministic = obj.optBoolean("deterministic", true),
+                workspaceRead = obj.optBoolean("workspace_read", true),
+                workspaceWrite = obj.optBoolean("workspace_write", true),
+                git = obj.optBoolean("git", true),
+                shellExec = obj.optBoolean("shell_exec", false),
+                deviceControl = obj.optBoolean("device_control", false),
+                disabledTools = disabled
+            )
+        }
+    }
+}
+
+sealed interface StreamUiEvent {
+    data class ThinkingDelta(val delta: String) : StreamUiEvent
+    data class ContentDelta(val delta: String) : StreamUiEvent
+    data class Status(val text: String) : StreamUiEvent
+    data class ToolRecord(val record: LocalToolCallRecord) : StreamUiEvent
+    data class SourcesUpdated(val sources: List<SearchSource>) : StreamUiEvent
+}
+
 data class SearchSource(
     val title: String,
     val url: String,
@@ -24,7 +158,11 @@ data class SearchSource(
 
 data class CitationPoint(
     val offset: Int,
-    val indexes: List<Int>
+    val indexes: List<Int>,
+    val startIndex: Int = -1,
+    val endIndex: Int = -1,
+    val url: String = "",
+    val title: String = ""
 )
 
 data class LocalToolCallRecord(
@@ -51,20 +189,25 @@ data class ChatMessage(
     val sources: List<SearchSource> = emptyList(),
     val citations: List<CitationPoint> = emptyList(),
     val localToolCalls: List<LocalToolCallRecord> = emptyList(),
+    val attachments: List<ChatAttachment> = emptyList(),
     val usageText: String = "",
+    val incompleteNotice: String = "",
     val isError: Boolean = false
 )
 
 /**
  * Represents a turn in the conversation context history.
- * For DeepSeek Prefix Cache compliance in Work mode, `subturnMessages` stores the intermediate
- * `assistant` (with `tool_calls`, without `reasoning_content`) and `tool` messages produced
- * during that turn so subsequent turns hit the server KV cache.
+ * For DeepSeek 2026-11 tool-use history & prefix cache compliance:
+ * - `reasoningContent` is stored on assistant turns so when `tools` is present in subsequent requests,
+ *   the engine can include `reasoning_content` on assistant messages as required by DeepSeek specs.
+ * - `subturnMessages` stores intermediate `assistant(tool_calls)` (including `reasoning_content`) and `tool` messages.
  */
 data class ContextTurn(
     val role: String,
     val content: String,
-    val subturnMessages: List<String> = emptyList()
+    val subturnMessages: List<String> = emptyList(),
+    val reasoningContent: String = "",
+    val attachments: List<ChatAttachment> = emptyList()
 )
 
 data class ConversationSession(
@@ -92,8 +235,10 @@ data class EngineTurnResult(
     val completionTokens: Int = 0,
     val cacheHitTokens: Int = 0,
     val cacheMissTokens: Int = 0,
+    val serverToolUseCount: Int = 0,
     val finishReason: String = "",
     val rounds: Int = 1,
+    val incompleteNotice: String = "",
     val error: String = ""
 )
 
@@ -105,12 +250,49 @@ object CoreProtocol {
         "你是 Fluorine（DeepSeek 本地工作台），严谨、直接、重事实的中文技术与研究助手。优先给出可核验结论、关键依据、清晰推导与边界条件。数学公式请使用标准 LaTeX 语法（行内 \$...\$，独立公式块 \$\$...\$\$）。若证据不足或未联网核实，请明确说明不确定性，绝不编造来源、命令输出或实验数据。"
 
     const val DEFAULT_WORK_SYSTEM_PROMPT =
-        "你是 Fluorine（DeepSeek 本地工作台），具备自主规划、取证与本地执行能力的中文技术 Agent。没有固定死板的工作流步骤限制：请根据用户的具体目标，自行判断是否需要拆解计划、是否需要调用联网搜索、本地确定性计算工具（calc/stats/unit_convert/date_calc/text_metrics/json_query/csv_summary/text_diff/encode_hash）或 Android/Termux 工作区工具（fs_list/fs_read/fs_write/fs_edit/fs_search/shell_exec/git_cmd/termux_api/self_adb）。简单问题直接回答或一步执行；复杂任务自主多轮调用工具验证后再汇总输出。数学公式请使用标准 LaTeX（\$...\$ 或 \$\$...\$\$）。生成或修改文件请使用 fs_write / fs_edit 写入工作区，方便用户直接导出产物。"
+        "你是 Fluorine（DeepSeek 本地工作台），具备自主规划、取证与本地执行能力的中文技术 Agent。没有固定死板的工作流步骤限制：请根据用户的具体目标，自行判断是否需要拆解计划、是否需要调用联网工具，或使用当前已注入的本地工具（如计算/统计/文本处理、工作区读写、Git、Shell 或设备控制工具）。简单问题直接回答或一步执行；复杂任务自主多轮调用工具验证后再汇总输出。数学公式请使用标准 LaTeX（\$...\$ 或 \$\$...\$\$）。生成或修改文件请优先写入工作区，方便用户直接导出产物。"
 
     val MODEL_OPTIONS = listOf(
-        ModelOption("deepseek-flash", "deepseek-flash · DeepSeek Flash (V4.1-Flash · 官方联网 + 本地工具)"),
-        ModelOption("deepseek-v4-pro", "deepseek-v4-pro · DeepSeek V4 Pro (V4-Pro · 深度推理 + 本地工具)")
+        ModelOption("deepseek-flash", "deepseek-flash · DeepSeek Flash (V4.1-Flash · 多模态 + 联网)"),
+        ModelOption("deepseek-v4-pro", "deepseek-v4-pro · DeepSeek V4 Pro (V4-Pro · 深度推理 · 纯文本)")
     )
+
+    val DEFAULT_MODEL_CAPABILITIES = mapOf(
+        "deepseek-flash" to ModelCapabilityInfo(
+            id = "deepseek-flash",
+            name = "DeepSeek-V4.1-Flash",
+            contextWindow = 1048576,
+            maxOutputTokens = 131072,
+            inputModalities = listOf("text", "image")
+        ),
+        "deepseek-v4-pro" to ModelCapabilityInfo(
+            id = "deepseek-v4-pro",
+            name = "DeepSeek-V4-Pro",
+            contextWindow = 1048576,
+            maxOutputTokens = 131072,
+            inputModalities = listOf("text")
+        )
+    )
+
+    fun supportsMultimodal(
+        modelId: String,
+        discoveredCapabilities: Map<String, ModelCapabilityInfo> = emptyMap()
+    ): Boolean {
+        val norm = modelId.trim()
+        val info = discoveredCapabilities[norm] ?: DEFAULT_MODEL_CAPABILITIES[norm]
+        if (info != null && info.inputModalities.isNotEmpty()) {
+            return info.inputModalities.any {
+                it.equals("image", ignoreCase = true) ||
+                    it.equals("file", ignoreCase = true) ||
+                    it.equals("vision", ignoreCase = true)
+            }
+        }
+        // Known text-only legacy aliases
+        if (norm == "deepseek-v4-pro" || norm == "deepseek-reasoner" || norm == "deepseek-chat") {
+            return false
+        }
+        return true
+    }
 
     val THINKING_MODE_OPTIONS = listOf(
         "auto" to "跟随底部开关",
@@ -121,7 +303,7 @@ object CoreProtocol {
     val EFFORT_OPTIONS = listOf(
         EffortOption("none", "none · 极速无深度思考"),
         EffortOption("low", "low · 轻量推理"),
-        EffortOption("medium", "medium · 标准推理"),
+        EffortOption("medium", "medium -> high · 标准映射高强度"),
         EffortOption("high", "high · 深度推理"),
         EffortOption("max", "max · 极限推理")
     )
@@ -181,63 +363,17 @@ object CoreProtocol {
         return try {
             val obj = JSONObject(rawJson)
             val ok = obj.optBoolean("ok", false)
-            if (!ok) {
-                val err = obj.optString("error", "未知引擎错误")
-                AppLogger.error("Engine", "Turn failed: $err")
-                return EngineTurnResult(ok = false, error = err)
-            }
+            val err = obj.optString("error", "")
 
-            val sources = mutableListOf<SearchSource>()
-            val srcArr = obj.optJSONArray("sources") ?: JSONArray()
-            for (i in 0 until srcArr.length()) {
-                val s = srcArr.optJSONObject(i) ?: continue
-                sources.add(
-                    SearchSource(
-                        title = s.optString("title", "").ifBlank { s.optString("url", "来源 #${i + 1}") },
-                        url = s.optString("url", ""),
-                        snippet = s.optString("snippet", ""),
-                        siteName = s.optString("site_name", ""),
-                        publishedAt = s.optString("published_at", ""),
-                        citeIndex = if (s.has("cite_index") && !s.isNull("cite_index")) s.optInt("cite_index") else null
-                    )
-                )
-            }
-
-            val citations = mutableListOf<CitationPoint>()
-            val citArr = obj.optJSONArray("citations") ?: JSONArray()
-            for (i in 0 until citArr.length()) {
-                val c = citArr.optJSONObject(i) ?: continue
-                val offset = c.optInt("offset", -1)
-                val idxArr = c.optJSONArray("indexes") ?: JSONArray()
-                val idxList = mutableListOf<Int>()
-                for (j in 0 until idxArr.length()) {
-                    idxList.add(idxArr.optInt(j))
-                }
-                if (offset >= 0 && idxList.isNotEmpty()) {
-                    citations.add(CitationPoint(offset = offset, indexes = idxList))
-                }
-            }
-
-            val toolCalls = mutableListOf<LocalToolCallRecord>()
-            val tcArr = obj.optJSONArray("local_tool_calls") ?: JSONArray()
-            for (i in 0 until tcArr.length()) {
-                val tc = tcArr.optJSONObject(i) ?: continue
-                toolCalls.add(
-                    LocalToolCallRecord(
-                        round = tc.optInt("round", 1),
-                        id = tc.optString("id", ""),
-                        name = tc.optString("name", ""),
-                        arguments = tc.optString("arguments", "{}"),
-                        output = tc.optString("output", "")
-                    )
-                )
-            }
+            val sources = parseSourcesArray(obj.optJSONArray("sources"))
+            val citations = parseCitationsArray(obj.optJSONArray("citations"))
+            val toolCalls = parseToolCallsArray(obj.optJSONArray("local_tool_calls"))
 
             val subturnMessages = mutableListOf<String>()
             val subArr = obj.optJSONArray("subturn_messages") ?: JSONArray()
             for (i in 0 until subArr.length()) {
-                val m = subArr.optJSONObject(i) ?: continue
-                subturnMessages.add(m.toString())
+                val m = subArr.optJSONObject(i) ?: subArr.optString(i, "").takeIf { it.isNotBlank() }
+                if (m != null) subturnMessages.add(m.toString())
             }
 
             val usage = obj.optJSONObject("usage")
@@ -245,6 +381,9 @@ object CoreProtocol {
             val completionTokens = usage?.optInt("completion_tokens", 0) ?: 0
             val cacheHitTokens = usage?.optInt("prompt_cache_hit_tokens", 0) ?: 0
             val cacheMissTokens = usage?.optInt("prompt_cache_miss_tokens", 0) ?: 0
+            val serverToolUse = usage?.optJSONObject("server_tool_use")?.let { stu ->
+                stu.optInt("web_search_requests", 0) + stu.optInt("read_url_requests", 0)
+            } ?: 0
             val rounds = obj.optInt("rounds", 1)
 
             val usageText = buildString {
@@ -257,19 +396,32 @@ object CoreProtocol {
                     }
                     append(" · 输出 $completionTokens tokens")
                 }
+                if (serverToolUse > 0) {
+                    if (isNotEmpty()) append(" · ")
+                    append("服务端联网调用 $serverToolUse 次")
+                }
                 if (rounds > 1) {
                     if (isNotEmpty()) append(" · ")
                     append("$rounds 轮工具交互")
                 }
             }
 
-            AppLogger.info(
-                "Engine",
-                "Turn ok: model=${obj.optString("model")} rounds=$rounds tools=${toolCalls.size} $usageText"
-            )
+            val finishReason = obj.optString("finish_reason", "")
+            val incompleteNotice = obj.optString("incomplete_notice", "").ifBlank {
+                if (!ok && err.isNotBlank()) err else ""
+            }
+
+            if (!ok) {
+                AppLogger.error("Engine", "Turn failed/incomplete: $err")
+            } else {
+                AppLogger.info(
+                    "Engine",
+                    "Turn ok: model=${obj.optString("model")} rounds=$rounds tools=${toolCalls.size} $usageText"
+                )
+            }
 
             EngineTurnResult(
-                ok = true,
+                ok = ok,
                 model = obj.optString("model", ""),
                 stage = obj.optString("stage", "chat"),
                 content = obj.optString("content", ""),
@@ -283,13 +435,86 @@ object CoreProtocol {
                 completionTokens = completionTokens,
                 cacheHitTokens = cacheHitTokens,
                 cacheMissTokens = cacheMissTokens,
-                finishReason = obj.optString("finish_reason", ""),
-                rounds = rounds
+                serverToolUseCount = serverToolUse,
+                finishReason = finishReason,
+                rounds = rounds,
+                incompleteNotice = incompleteNotice,
+                error = if (!ok) err.ifBlank { "未知引擎错误" } else ""
             )
         } catch (e: Exception) {
             AppLogger.error("Engine", "Parse turn result error: ${e.message}")
             EngineTurnResult(ok = false, error = "解析响应失败: ${e.message}")
         }
+    }
+
+    fun parseSourcesArray(srcArr: JSONArray?): List<SearchSource> {
+        if (srcArr == null) return emptyList()
+        val sources = mutableListOf<SearchSource>()
+        for (i in 0 until srcArr.length()) {
+            val s = srcArr.optJSONObject(i) ?: continue
+            sources.add(
+                SearchSource(
+                    title = s.optString("title", "").ifBlank { s.optString("url", "来源 #${i + 1}") },
+                    url = s.optString("url", ""),
+                    snippet = s.optString("snippet", ""),
+                    siteName = s.optString("site_name", ""),
+                    publishedAt = s.optString("published_at", ""),
+                    citeIndex = if (s.has("cite_index") && !s.isNull("cite_index")) s.optInt("cite_index") else null
+                )
+            )
+        }
+        return sources
+    }
+
+    fun parseCitationsArray(citArr: JSONArray?): List<CitationPoint> {
+        if (citArr == null) return emptyList()
+        val citations = mutableListOf<CitationPoint>()
+        for (i in 0 until citArr.length()) {
+            val c = citArr.optJSONObject(i) ?: continue
+            val offset = c.optInt("offset", c.optInt("end_index", -1))
+            val startIndex = c.optInt("start_index", -1)
+            val endIndex = c.optInt("end_index", -1)
+            val url = c.optString("url", "")
+            val title = c.optString("title", "")
+            val idxArr = c.optJSONArray("indexes")
+            val idxList = mutableListOf<Int>()
+            if (idxArr != null) {
+                for (j in 0 until idxArr.length()) {
+                    idxList.add(idxArr.optInt(j))
+                }
+            }
+            if (offset >= 0 && (idxList.isNotEmpty() || url.isNotBlank())) {
+                citations.add(
+                    CitationPoint(
+                        offset = offset,
+                        indexes = idxList,
+                        startIndex = startIndex,
+                        endIndex = endIndex,
+                        url = url,
+                        title = title
+                    )
+                )
+            }
+        }
+        return citations
+    }
+
+    fun parseToolCallsArray(tcArr: JSONArray?): List<LocalToolCallRecord> {
+        if (tcArr == null) return emptyList()
+        val toolCalls = mutableListOf<LocalToolCallRecord>()
+        for (i in 0 until tcArr.length()) {
+            val tc = tcArr.optJSONObject(i) ?: continue
+            toolCalls.add(
+                LocalToolCallRecord(
+                    round = tc.optInt("round", 1),
+                    id = tc.optString("id", ""),
+                    name = tc.optString("name", ""),
+                    arguments = tc.optString("arguments", "{}"),
+                    output = tc.optString("output", "")
+                )
+            )
+        }
+        return toolCalls
     }
 
     /**
@@ -325,34 +550,38 @@ object CoreProtocol {
     }
 
     /**
-     * Lists all user-generated files currently inside the app's workspace directory.
+     * Lists user-generated files inside the app's workspace directory,
+     * rejecting symlinks whose canonical target escapes `workspaceRoot`.
      */
     fun listWorkspaceFiles(workspaceRoot: File): List<WorkspaceFileArtifact> {
         if (!workspaceRoot.exists() || !workspaceRoot.isDirectory) return emptyList()
-        val rootCanonical = runCatching { workspaceRoot.canonicalFile }.getOrDefault(workspaceRoot)
+        val rootCanonical = runCatching { workspaceRoot.canonicalFile }.getOrNull() ?: return emptyList()
         val rootPrefix = rootCanonical.path
         val results = mutableListOf<WorkspaceFileArtifact>()
 
+        fun insideRoot(f: File): Boolean {
+            val cPath = runCatching { f.canonicalFile.path }.getOrNull() ?: return false
+            return cPath == rootPrefix || cPath.startsWith(rootPrefix + File.separator)
+        }
+
         workspaceRoot.walkTopDown()
             .onEnter { dir ->
-                dir.name != ".git" && dir.name != "target" && dir.name != "build"
+                dir.name != ".git" && dir.name != "target" && dir.name != "build" && insideRoot(dir)
             }
             .forEach { f ->
-                if (f.isFile && results.size < 200) {
+                if (f.isFile && results.size < 200 && insideRoot(f)) {
                     val cPath = runCatching { f.canonicalFile.path }.getOrDefault(f.path)
-                    val rel = if (cPath.startsWith(rootPrefix + File.separator)) {
-                        cPath.substring(rootPrefix.length + 1).replace('\\', '/')
-                    } else {
-                        f.name
-                    }
-                    results.add(
-                        WorkspaceFileArtifact(
-                            relativePath = rel,
-                            fileName = f.name,
-                            bytes = f.length(),
-                            operation = "workspace"
+                    if (cPath.startsWith(rootPrefix + File.separator)) {
+                        val rel = cPath.substring(rootPrefix.length + 1).replace('\\', '/')
+                        results.add(
+                            WorkspaceFileArtifact(
+                                relativePath = rel,
+                                fileName = f.name,
+                                bytes = f.length(),
+                                operation = "workspace"
+                            )
                         )
-                    )
+                    }
                 }
             }
         return results.sortedBy { it.relativePath }
@@ -380,7 +609,7 @@ object CoreProtocol {
         activeSessionId: String
     ): String {
         val root = JSONObject()
-        root.put("version", 2)
+        root.put("version", 3)
         root.put("active_session_id", activeSessionId)
         val sessionsArr = JSONArray()
         for (s in sessions) {
@@ -407,6 +636,45 @@ object CoreProtocol {
         }
     }
 
+    private fun serializeAttachments(list: List<ChatAttachment>): JSONArray {
+        val arr = JSONArray()
+        for (a in list) {
+            arr.put(
+                JSONObject()
+                    .put("id", a.id)
+                    .put("name", a.name)
+                    .put("mime_type", a.mimeType)
+                    .put("kind", a.kind)
+                    .put("local_path", a.localPath)
+                    .put("size_bytes", a.sizeBytes)
+                    .put("file_id", a.fileId)
+                    .put("parse_purpose", a.parsePurpose)
+            )
+        }
+        return arr
+    }
+
+    private fun deserializeAttachments(arr: JSONArray?): List<ChatAttachment> {
+        if (arr == null) return emptyList()
+        val list = mutableListOf<ChatAttachment>()
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            list.add(
+                ChatAttachment(
+                    id = o.optString("id", "att_$i"),
+                    name = o.optString("name", "file"),
+                    mimeType = o.optString("mime_type", "application/octet-stream"),
+                    kind = o.optString("kind", "document"),
+                    localPath = o.optString("local_path", ""),
+                    sizeBytes = o.optLong("size_bytes", 0L),
+                    fileId = o.optString("file_id", ""),
+                    parsePurpose = o.optString("parse_purpose", "user_data")
+                )
+            )
+        }
+        return list
+    }
+
     private fun serializeSingleSessionObject(session: ConversationSession): JSONObject {
         val obj = JSONObject()
         obj.put("id", session.id)
@@ -424,7 +692,9 @@ object CoreProtocol {
                 .put("tags", JSONArray(m.tags))
                 .put("thinking", m.thinking)
                 .put("usageText", m.usageText)
+                .put("incompleteNotice", m.incompleteNotice)
                 .put("isError", m.isError)
+
             val srcArr = JSONArray()
             for (s in m.sources) {
                 srcArr.put(
@@ -439,6 +709,20 @@ object CoreProtocol {
             }
             mObj.put("sources", srcArr)
 
+            val citArr = JSONArray()
+            for (c in m.citations) {
+                citArr.put(
+                    JSONObject()
+                        .put("offset", c.offset)
+                        .put("indexes", JSONArray(c.indexes))
+                        .put("start_index", c.startIndex)
+                        .put("end_index", c.endIndex)
+                        .put("url", c.url)
+                        .put("title", c.title)
+                )
+            }
+            mObj.put("citations", citArr)
+
             val tcArr = JSONArray()
             for (tc in m.localToolCalls) {
                 tcArr.put(
@@ -451,6 +735,9 @@ object CoreProtocol {
                 )
             }
             mObj.put("localToolCalls", tcArr)
+            if (m.attachments.isNotEmpty()) {
+                mObj.put("attachments", serializeAttachments(m.attachments))
+            }
             msgArr.put(mObj)
         }
         obj.put("chatMessages", msgArr)
@@ -460,8 +747,14 @@ object CoreProtocol {
             val cObj = JSONObject()
                 .put("role", c.role)
                 .put("content", c.content)
+            if (c.reasoningContent.isNotEmpty()) {
+                cObj.put("reasoning_content", c.reasoningContent)
+            }
             if (c.subturnMessages.isNotEmpty()) {
                 cObj.put("subturn_messages", JSONArray(c.subturnMessages))
+            }
+            if (c.attachments.isNotEmpty()) {
+                cObj.put("attachments", serializeAttachments(c.attachments))
             }
             ctxArr.put(cObj)
         }
@@ -478,36 +771,10 @@ object CoreProtocol {
             val tArr = m.optJSONArray("tags") ?: JSONArray()
             for (j in 0 until tArr.length()) tags.add(tArr.optString(j))
 
-            val sources = mutableListOf<SearchSource>()
-            val sArr = m.optJSONArray("sources") ?: JSONArray()
-            for (j in 0 until sArr.length()) {
-                val s = sArr.optJSONObject(j) ?: continue
-                sources.add(
-                    SearchSource(
-                        title = s.optString("title", ""),
-                        url = s.optString("url", ""),
-                        snippet = s.optString("snippet", ""),
-                        siteName = s.optString("site_name", ""),
-                        publishedAt = s.optString("published_at", ""),
-                        citeIndex = if (s.has("cite_index") && !s.isNull("cite_index")) s.optInt("cite_index") else null
-                    )
-                )
-            }
-
-            val toolCalls = mutableListOf<LocalToolCallRecord>()
-            val tcArr = m.optJSONArray("localToolCalls") ?: JSONArray()
-            for (j in 0 until tcArr.length()) {
-                val tc = tcArr.optJSONObject(j) ?: continue
-                toolCalls.add(
-                    LocalToolCallRecord(
-                        round = tc.optInt("round", 1),
-                        id = tc.optString("id", ""),
-                        name = tc.optString("name", ""),
-                        arguments = tc.optString("arguments", "{}"),
-                        output = tc.optString("output", "")
-                    )
-                )
-            }
+            val sources = parseSourcesArray(m.optJSONArray("sources"))
+            val citations = parseCitationsArray(m.optJSONArray("citations"))
+            val toolCalls = parseToolCallsArray(m.optJSONArray("localToolCalls"))
+            val attachments = deserializeAttachments(m.optJSONArray("attachments"))
 
             msgList.add(
                 ChatMessage(
@@ -517,8 +784,11 @@ object CoreProtocol {
                     tags = tags,
                     thinking = m.optString("thinking", ""),
                     sources = sources,
+                    citations = citations,
                     localToolCalls = toolCalls,
+                    attachments = attachments,
                     usageText = m.optString("usageText", ""),
+                    incompleteNotice = m.optString("incompleteNotice", ""),
                     isError = m.optBoolean("isError", false)
                 )
             )
@@ -540,7 +810,9 @@ object CoreProtocol {
                 ContextTurn(
                     role = c.optString("role", "user"),
                     content = c.optString("content", ""),
-                    subturnMessages = subturns
+                    subturnMessages = subturns,
+                    reasoningContent = c.optString("reasoning_content", ""),
+                    attachments = deserializeAttachments(c.optJSONArray("attachments"))
                 )
             )
         }

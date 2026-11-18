@@ -1,13 +1,16 @@
 package com.uronic0x.fluorine.ui.components
 
+import android.graphics.BitmapFactory
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -33,11 +36,13 @@ import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
+import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Language
 import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Visibility
+import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -46,6 +51,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -53,6 +59,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.testTag
@@ -64,28 +73,37 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.uronic0x.fluorine.R
+import com.uronic0x.fluorine.protocol.ChatAttachment
 import com.uronic0x.fluorine.protocol.ChatMessage
 import com.uronic0x.fluorine.protocol.CoreProtocol
 import com.uronic0x.fluorine.protocol.LocalToolCallRecord
 import com.uronic0x.fluorine.protocol.SearchSource
 import com.uronic0x.fluorine.protocol.WorkspaceFileArtifact
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 
 @Composable
 fun WelcomeSection(
     modifier: Modifier = Modifier
 ) {
-    Box(
+    Column(
         modifier = modifier
             .fillMaxWidth()
-            .padding(top = 84.dp, bottom = 48.dp, start = 12.dp, end = 12.dp),
-        contentAlignment = Alignment.CenterStart
+            .padding(top = 64.dp, bottom = 36.dp, start = 12.dp, end = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         Text(
             text = stringResource(R.string.welcome_title),
             style = MaterialTheme.typography.headlineLarge,
-            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.88f)
+            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.92f)
+        )
+        Text(
+            text = stringResource(R.string.welcome_desc),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
         )
     }
 }
@@ -228,6 +246,11 @@ fun MessageItemCard(
                 }
             }
 
+            // 0. Attached Images & Files on user messages
+            if (message.attachments.isNotEmpty()) {
+                MessageAttachmentsStrip(attachments = message.attachments)
+            }
+
             // 1. Collapsible Thinking Process
             if (message.thinking.isNotBlank()) {
                 CollapsibleThinkingBox(
@@ -244,7 +267,7 @@ fun MessageItemCard(
                 )
             }
 
-            // 3. Generated / Modified Workspace File Artifacts (Requirement #1: Rounded-Corner UI + Export)
+            // 3. Generated / Modified Workspace File Artifacts
             if (artifacts.isNotEmpty()) {
                 WorkspaceArtifactsSection(
                     artifacts = artifacts,
@@ -271,7 +294,37 @@ fun MessageItemCard(
                 )
             }
 
-            // 5. Collapsible Search Sources (Requirement #9: Collapsed by Default)
+            // 4b. Non-destructive warning banner when stream ended with content_filter / length / abort / empty
+            if (message.incompleteNotice.isNotBlank()) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("incomplete_notice_banner"),
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.45f),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.45f))
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.WarningAmber,
+                            contentDescription = "状态提示",
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = message.incompleteNotice,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    }
+                }
+            }
+
+            // 5. Collapsible Search Sources
             if (message.sources.isNotEmpty()) {
                 CollapsibleSourcesSection(
                     sources = message.sources,
@@ -287,6 +340,123 @@ fun MessageItemCard(
                     style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+            }
+        }
+    }
+}
+
+@Composable
+fun loadThumbnailBitmap(localPath: String, targetMaxPx: Int = 256): ImageBitmap? {
+    val bmpState by produceState<ImageBitmap?>(initialValue = null, key1 = localPath) {
+        value = withContext(Dispatchers.IO) {
+            runCatching {
+                val file = File(localPath)
+                if (!file.exists() || !file.isFile) return@runCatching null
+                val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeFile(localPath, boundsOpts)
+                val w = boundsOpts.outWidth
+                val h = boundsOpts.outHeight
+                if (w <= 0 || h <= 0) return@runCatching null
+                var sample = 1
+                while ((w / sample) > targetMaxPx || (h / sample) > targetMaxPx) {
+                    sample *= 2
+                }
+                val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sample }
+                BitmapFactory.decodeFile(localPath, decodeOpts)?.asImageBitmap()
+            }.getOrNull()
+        }
+    }
+    return bmpState
+}
+
+@Composable
+private fun MessageAttachmentsStrip(attachments: List<ChatAttachment>) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        attachments.forEach { att ->
+            if (att.kind == "image" && att.localPath.isNotBlank()) {
+                val thumb = loadThumbnailBitmap(att.localPath)
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        if (thumb != null) {
+                            Image(
+                                bitmap = thumb,
+                                contentDescription = att.name,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Outlined.Image,
+                                contentDescription = att.name,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                        Column {
+                            Text(
+                                text = att.name,
+                                style = MaterialTheme.typography.labelSmall,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = CoreProtocol.formatFileSize(att.sizeBytes),
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            } else {
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Description,
+                            contentDescription = att.name,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Column {
+                            Text(
+                                text = att.name,
+                                style = MaterialTheme.typography.labelSmall,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = buildString {
+                                    append(CoreProtocol.formatFileSize(att.sizeBytes))
+                                    if (att.fileId.isNotBlank()) append(" · 已解析")
+                                },
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
             }
         }
     }

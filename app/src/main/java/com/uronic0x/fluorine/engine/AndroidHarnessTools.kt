@@ -3,14 +3,15 @@ package com.uronic0x.fluorine.engine
 import android.os.Build
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.concurrent.TimeUnit
 
 /**
  * Android/Termux local workspace & harness tools:
  * - fs_list / fs_read / fs_write / fs_edit / fs_search
- * - shell_exec (with destructive command blocklist & timeout)
- * - git_cmd (status/diff/log/branch/show)
+ * - shell_exec (user-toggleable on-device, with destructive command blocklist & timeout)
+ * - git_cmd (status/diff/log/branch/show/rev-parse)
  * - termux_api (battery-status / clipboard-get / clipboard-set / notification / toast / tts-speak / wifi-connectioninfo)
  * - self_adb (devices / getprop / dumpsys / pm / wm / logcat / input / am)
  */
@@ -33,9 +34,9 @@ object AndroidHarnessTools {
         "self_adb"
     )
 
-    fun declarations(): JSONArray {
-        val arr = JSONArray()
-        arr.put(
+    fun declarations(enabledTools: Set<String>? = null): JSONArray {
+        val all = JSONArray()
+        all.put(
             fnDecl(
                 name = "fs_list",
                 description = "List files and directories inside the workspace (or read-only /sdcard when enabled). Returns name, type, and size.",
@@ -45,7 +46,7 @@ object AndroidHarnessTools {
                 required = emptyList()
             )
         )
-        arr.put(
+        all.put(
             fnDecl(
                 name = "fs_read",
                 description = "Read a UTF-8 text file from workspace (or read-only /sdcard when enabled), optionally slicing by 1-based line range.",
@@ -56,10 +57,10 @@ object AndroidHarnessTools {
                 required = listOf("path")
             )
         )
-        arr.put(
+        all.put(
             fnDecl(
                 name = "fs_write",
-                description = "Create or overwrite a UTF-8 text file inside the workspace directory. Generated files are automatically presented to the user with a rounded export card.",
+                description = "Create, overwrite, or append a UTF-8 text file inside the workspace directory. Generated files are presented to the user with an export card.",
                 properties = JSONObject()
                     .put("path", prop("string", "Relative file path inside workspace (must not escape workspace)"))
                     .put("content", prop("string", "Full text content to write"))
@@ -67,7 +68,7 @@ object AndroidHarnessTools {
                 required = listOf("path", "content")
             )
         )
-        arr.put(
+        all.put(
             fnDecl(
                 name = "fs_edit",
                 description = "Surgical search-and-replace edit on an existing file inside the workspace.",
@@ -79,7 +80,7 @@ object AndroidHarnessTools {
                 required = listOf("path", "old_text", "new_text")
             )
         )
-        arr.put(
+        all.put(
             fnDecl(
                 name = "fs_search",
                 description = "Search for a substring or keyword across text files in the workspace.",
@@ -90,7 +91,7 @@ object AndroidHarnessTools {
                 required = listOf("query")
             )
         )
-        arr.put(
+        all.put(
             fnDecl(
                 name = "shell_exec",
                 description = "Execute a non-interactive local shell command with timeout inside the workspace directory.",
@@ -100,7 +101,7 @@ object AndroidHarnessTools {
                 required = listOf("command")
             )
         )
-        arr.put(
+        all.put(
             fnDecl(
                 name = "git_cmd",
                 description = "Run a safe Git command (status, diff, log, show, branch, rev-parse) inside the workspace.",
@@ -110,10 +111,10 @@ object AndroidHarnessTools {
                 required = listOf("subcommand")
             )
         )
-        arr.put(
+        all.put(
             fnDecl(
                 name = "termux_api",
-                description = "Invoke an allowlisted Termux:API command on Android (battery-status, clipboard-get, clipboard-set, toast, notification, wifi-connectioninfo, tts-speak) with Android system fallback.",
+                description = "Invoke an allowlisted Termux:API command on Android (battery-status, clipboard-get, clipboard-set, toast, notification, wifi-connectioninfo, tts-speak).",
                 properties = JSONObject()
                     .put("api", prop("string", "One of: battery-status, clipboard-get, clipboard-set, toast, notification, wifi-connectioninfo, tts-speak"))
                     .put("args", JSONObject().put("type", "array").put("items", JSONObject().put("type", "string")).put("description", "Optional arguments"))
@@ -121,7 +122,7 @@ object AndroidHarnessTools {
                 required = listOf("api")
             )
         )
-        arr.put(
+        all.put(
             fnDecl(
                 name = "self_adb",
                 description = "Run an allowlisted local Android diagnostic/ADB subcommand (devices, getprop, dumpsys, pm, wm, logcat, input, am) with local Android shell fallback.",
@@ -131,7 +132,17 @@ object AndroidHarnessTools {
                 required = listOf("action")
             )
         )
-        return arr
+
+        if (enabledTools == null) return all
+        val filtered = JSONArray()
+        for (i in 0 until all.length()) {
+            val item = all.optJSONObject(i) ?: continue
+            val fnName = item.optJSONObject("function")?.optString("name", "").orEmpty()
+            if (fnName in enabledTools) {
+                filtered.put(item)
+            }
+        }
+        return filtered
     }
 
     fun execute(
@@ -139,8 +150,14 @@ object AndroidHarnessTools {
         args: JSONObject,
         workspaceRoot: File,
         allowSdcardReadonly: Boolean,
-        shellTimeoutSecs: Long = DEFAULT_SHELL_TIMEOUT_SECS
+        shellTimeoutSecs: Long = DEFAULT_SHELL_TIMEOUT_SECS,
+        enabledTools: Set<String>? = null
     ): JSONObject {
+        if (enabledTools != null && name !in enabledTools) {
+            return JSONObject()
+                .put("ok", false)
+                .put("error", "Tool '$name' is disabled by user Work tool configuration.")
+        }
         workspaceRoot.mkdirs()
         return try {
             when (name) {
@@ -160,6 +177,24 @@ object AndroidHarnessTools {
         }
     }
 
+    private fun isAllowedCanonicalFile(
+        candidate: File,
+        workspaceRoot: File,
+        allowSdcardReadonly: Boolean,
+        writeAccess: Boolean
+    ): Boolean {
+        val cPath = runCatching { candidate.canonicalFile.path }.getOrNull() ?: return false
+        val wsPath = runCatching { workspaceRoot.canonicalFile.path }.getOrNull() ?: return false
+        if (cPath == wsPath || cPath.startsWith(wsPath + File.separator)) return true
+        if (!writeAccess && allowSdcardReadonly &&
+            (cPath == "/sdcard" || cPath.startsWith("/sdcard/") ||
+                cPath == "/storage/emulated/0" || cPath.startsWith("/storage/emulated/0/"))
+        ) {
+            return true
+        }
+        return false
+    }
+
     private fun resolvePath(
         rawPath: String,
         workspaceRoot: File,
@@ -174,7 +209,9 @@ object AndroidHarnessTools {
         ) {
             val f = File(trimmed).canonicalFile
             val p = f.path
-            if (p.startsWith("/sdcard") || p.startsWith("/storage/emulated/0")) {
+            if (p == "/sdcard" || p.startsWith("/sdcard/") ||
+                p == "/storage/emulated/0" || p.startsWith("/storage/emulated/0/")
+            ) {
                 return f
             }
             throw IllegalArgumentException("Read-only external path must stay within /sdcard")
@@ -224,6 +261,7 @@ object AndroidHarnessTools {
             for (child in children) {
                 if (entries.length() >= maxEntries) break
                 if (child.name == ".git" || child.name == "target" || child.name == "build") continue
+                if (!isAllowedCanonicalFile(child, workspaceRoot, allowSdcardReadonly, writeAccess = false)) continue
                 val item = JSONObject()
                     .put("path", relativeDisplayPath(child, workspaceRoot))
                     .put("type", if (child.isDirectory) "dir" else "file")
@@ -266,7 +304,7 @@ object AndroidHarnessTools {
             return JSONObject().put(
                 "ok",
                 false
-            ).put("error", "File exceeds ${MAX_FILE_READ_BYTES} bytes limit (${file.length()} bytes)")
+            ).put("error", "File exceeds $MAX_FILE_READ_BYTES bytes limit (${file.length()} bytes)")
         }
         val content = file.readText(Charsets.UTF_8)
         val lines = content.lines()
@@ -299,6 +337,14 @@ object AndroidHarnessTools {
             return JSONObject().put("ok", false).put("error", "Content exceeds $MAX_FILE_WRITE_BYTES bytes")
         }
         val file = resolvePath(rel, workspaceRoot, allowSdcardReadonly = false, writeAccess = true)
+        if (append && file.exists()) {
+            val totalAfter = file.length() + bytes.size.toLong()
+            if (totalAfter > MAX_FILE_WRITE_BYTES) {
+                return JSONObject()
+                    .put("ok", false)
+                    .put("error", "Appending would exceed $MAX_FILE_WRITE_BYTES bytes total limit ($totalAfter bytes)")
+            }
+        }
         file.parentFile?.mkdirs()
         if (append && file.exists()) {
             file.appendText(content, Charsets.UTF_8)
@@ -328,6 +374,9 @@ object AndroidHarnessTools {
         if (!file.exists() || !file.isFile) {
             return JSONObject().put("ok", false).put("error", "File not found: $rel")
         }
+        if (file.length() > MAX_FILE_WRITE_BYTES) {
+            return JSONObject().put("ok", false).put("error", "File exceeds $MAX_FILE_WRITE_BYTES bytes edit limit")
+        }
         val original = file.readText(Charsets.UTF_8)
         val occurrences = countOccurrences(original, oldText)
         if (occurrences == 0) {
@@ -343,6 +392,12 @@ object AndroidHarnessTools {
             original.replace(oldText, newText)
         } else {
             original.replaceFirst(oldText, newText)
+        }
+        val updatedBytes = updated.toByteArray(Charsets.UTF_8)
+        if (updatedBytes.size > MAX_FILE_WRITE_BYTES) {
+            return JSONObject()
+                .put("ok", false)
+                .put("error", "Edited content exceeds $MAX_FILE_WRITE_BYTES bytes limit (${updatedBytes.size} bytes)")
         }
         file.writeText(updated, Charsets.UTF_8)
         val relDisplay = relativeDisplayPath(file, workspaceRoot)
@@ -382,6 +437,7 @@ object AndroidHarnessTools {
         val maxMatches = 80
         fun searchFile(f: File) {
             if (matches.length() >= maxMatches || !f.isFile || f.length() > MAX_FILE_READ_BYTES) return
+            if (!isAllowedCanonicalFile(f, workspaceRoot, allowSdcardReadonly, writeAccess = false)) return
             val lines = runCatching { f.readLines(Charsets.UTF_8) }.getOrNull() ?: return
             for ((idx, line) in lines.withIndex()) {
                 if (matches.length() >= maxMatches) break
@@ -404,7 +460,12 @@ object AndroidHarnessTools {
             searchFile(root)
         } else {
             root.walkTopDown()
-                .onEnter { it.name != ".git" && it.name != "target" && it.name != "build" }
+                .onEnter { dir ->
+                    dir.name != ".git" &&
+                        dir.name != "target" &&
+                        dir.name != "build" &&
+                        isAllowedCanonicalFile(dir, workspaceRoot, allowSdcardReadonly, writeAccess = false)
+                }
                 .forEach { f ->
                     if (matches.length() < maxMatches) searchFile(f)
                 }
@@ -499,14 +560,16 @@ object AndroidHarnessTools {
         val res = runProcess(cmd, workspaceRoot, stdinText, timeoutSecs)
         if (res.optBoolean("ok", false)) return res
 
-        // Fallback when Termux:API binary is not installed in standard Android APK sandbox
+        val baseErr = res.optString("error", "").ifBlank {
+            res.optString("output", "termux-api binary ($binName) failed or unavailable")
+        }
         return JSONObject()
-            .put("ok", true)
-            .put("fallback", "android_os")
+            .put("ok", false)
             .put("api", api)
+            .put("binary", binName)
             .put("device_model", "${Build.MANUFACTURER} ${Build.MODEL}")
             .put("sdk_int", Build.VERSION.SDK_INT)
-            .put("note", "termux-api binary ($binName) not found in PATH; returned Android runtime metadata.")
+            .put("error", "$binName failed: $baseErr")
     }
 
     private fun toolSelfAdb(
@@ -541,6 +604,10 @@ object AndroidHarnessTools {
         return runProcess(directCmd, workspaceRoot, null, timeoutSecs)
     }
 
+    /**
+     * Deadlock-free process runner: drains combined stdout/stderr concurrently on a background thread
+     * before `waitFor`, capping buffered bytes at `MAX_CMD_OUTPUT_BYTES` to prevent memory exhaustion.
+     */
     private fun runProcess(
         cmd: List<String>,
         cwd: File,
@@ -552,25 +619,56 @@ object AndroidHarnessTools {
                 .directory(cwd)
                 .redirectErrorStream(true)
             val proc = pb.start()
-            if (stdinText != null) {
-                proc.outputStream.use { it.write(stdinText.toByteArray(Charsets.UTF_8)) }
-            } else {
-                proc.outputStream.close()
+
+            val outBuffer = ByteArrayOutputStream()
+            var truncated = false
+            val drainThread = Thread {
+                runCatching {
+                    val buf = ByteArray(4096)
+                    proc.inputStream.use { input ->
+                        while (true) {
+                            val read = input.read(buf)
+                            if (read < 0) break
+                            if (outBuffer.size() < MAX_CMD_OUTPUT_BYTES) {
+                                val remaining = MAX_CMD_OUTPUT_BYTES - outBuffer.size()
+                                val toWrite = read.coerceAtMost(remaining)
+                                outBuffer.write(buf, 0, toWrite)
+                                if (read > remaining) truncated = true
+                            } else {
+                                truncated = true
+                            }
+                        }
+                    }
+                }
+            }.apply {
+                isDaemon = true
+                start()
             }
-            val finished = proc.waitFor(timeoutSecs.coerceIn(2L, 120L), TimeUnit.SECONDS)
+
+            runCatching {
+                if (stdinText != null) {
+                    proc.outputStream.use { it.write(stdinText.toByteArray(Charsets.UTF_8)) }
+                } else {
+                    proc.outputStream.close()
+                }
+            }
+
+            val clampedTimeout = timeoutSecs.coerceIn(2L, 120L)
+            val finished = proc.waitFor(clampedTimeout, TimeUnit.SECONDS)
             if (!finished) {
                 proc.destroyForcibly()
+                drainThread.join(1000L)
+                val partialOut = String(outBuffer.toByteArray(), Charsets.UTF_8).trimEnd()
                 return JSONObject()
                     .put("ok", false)
-                    .put("error", "Process timed out after ${timeoutSecs}s")
+                    .put("output", partialOut)
+                    .put("truncated", truncated)
+                    .put("error", "Process timed out after ${clampedTimeout}s")
             }
-            val rawBytes = proc.inputStream.use { it.readBytes() }
-            val truncated = rawBytes.size > MAX_CMD_OUTPUT_BYTES
-            val outText = if (truncated) {
-                String(rawBytes, 0, MAX_CMD_OUTPUT_BYTES, Charsets.UTF_8) + "\n...[truncated]..."
-            } else {
-                String(rawBytes, Charsets.UTF_8)
-            }
+
+            drainThread.join(2000L)
+            val rawOut = String(outBuffer.toByteArray(), Charsets.UTF_8)
+            val outText = if (truncated) "$rawOut\n...[truncated]..." else rawOut
             val code = proc.exitValue()
             JSONObject()
                 .put("ok", code == 0)

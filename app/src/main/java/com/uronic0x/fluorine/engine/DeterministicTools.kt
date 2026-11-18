@@ -48,7 +48,19 @@ object DeterministicTools {
         "encode_hash"
     )
 
-    fun declarations(): JSONArray = toolDefinitions()
+    fun declarations(enabledTools: Set<String>? = null): JSONArray {
+        val all = toolDefinitions()
+        if (enabledTools == null) return all
+        val filtered = JSONArray()
+        for (i in 0 until all.length()) {
+            val item = all.optJSONObject(i) ?: continue
+            val fnName = item.optJSONObject("function")?.optString("name", "").orEmpty()
+            if (fnName in enabledTools) {
+                filtered.put(item)
+            }
+        }
+        return filtered
+    }
 
     fun execute(name: String, args: JSONObject): JSONObject {
         return try {

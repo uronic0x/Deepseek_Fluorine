@@ -8,12 +8,20 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,6 +31,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -34,19 +43,28 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.ArrowUpward
+import androidx.compose.material.icons.outlined.AttachFile
+import androidx.compose.material.icons.outlined.Build
+import androidx.compose.material.icons.outlined.ChatBubbleOutline
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.DarkMode
+import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.FolderOpen
+import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Language
 import androidx.compose.material.icons.outlined.LightMode
 import androidx.compose.material.icons.outlined.Menu
+import androidx.compose.material.icons.outlined.PhotoCamera
 import androidx.compose.material.icons.outlined.Psychology
-import androidx.compose.material3.Button
+import androidx.compose.material.icons.outlined.Stop
 import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -65,12 +83,15 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -80,7 +101,10 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.uronic0x.fluorine.protocol.ChatAttachment
 import com.uronic0x.fluorine.protocol.CoreProtocol
 import com.uronic0x.fluorine.protocol.WorkspaceFileArtifact
 import com.uronic0x.fluorine.ui.FluorineUiState
@@ -93,9 +117,11 @@ import com.uronic0x.fluorine.ui.components.SettingsDialog
 import com.uronic0x.fluorine.ui.components.WelcomeSection
 import com.uronic0x.fluorine.ui.components.WorkspaceFilePreviewDialog
 import com.uronic0x.fluorine.ui.components.WorkspaceFilesDialog
+import com.uronic0x.fluorine.ui.components.loadThumbnailBitmap
 import com.uronic0x.fluorine.ui.theme.AppThemeMode
 import com.uronic0x.fluorine.ui.theme.FluorineTheme
 import kotlinx.coroutines.launch
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -131,6 +157,8 @@ fun FluorineWorkbenchApp(
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
 
+    var showAttachmentDrawer by rememberSaveable { mutableStateOf(false) }
+
     val dismissKeyboard: () -> Unit = remember(focusManager, keyboardController) {
         {
             focusManager.clearFocus(force = true)
@@ -161,9 +189,100 @@ fun FluorineWorkbenchApp(
         }
     }
 
-    // Close navigation drawer on system back press
-    BackHandler(enabled = drawerState.isOpen) {
-        scope.launch { drawerState.close() }
+    // Close navigation drawer or attachment tray on system back press
+    BackHandler(enabled = drawerState.isOpen || showAttachmentDrawer) {
+        if (drawerState.isOpen) {
+            scope.launch { drawerState.close() }
+        } else {
+            showAttachmentDrawer = false
+        }
+    }
+
+    // Camera capture launcher via FileProvider
+    var pendingCameraFile by remember { mutableStateOf<File?>(null) }
+    val takePictureLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicture()
+    ) { saved ->
+        val file = pendingCameraFile
+        pendingCameraFile = null
+        if (saved && file != null) {
+            viewModel.addCameraCapture(file)
+        } else {
+            runCatching { file?.delete() }
+        }
+    }
+
+    // Android Photo Picker (zero storage permission required per Google Play policy)
+    val pickPhotoLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickMultipleVisualMedia(maxItems = 5)
+    ) { uris ->
+        uris.forEach { uri ->
+            viewModel.addUriAttachment(context, uri, requestedKind = "image")
+        }
+    }
+
+    // Document / text / spreadsheet file picker via SAF OpenDocument
+    val pickDocumentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            viewModel.addUriAttachment(context, uri, requestedKind = "document")
+        }
+    }
+
+    val multimodalSupported = remember(uiState.model, uiState.discoveredCapabilities) {
+        viewModel.isMultimodalSupportedForCurrentModel()
+    }
+
+    val triggerCamera: () -> Unit = {
+        if (!multimodalSupported) {
+            viewModel.notifyMultimodalUnavailable()
+        } else {
+            runCatching {
+                val file = viewModel.createCameraCaptureFile()
+                pendingCameraFile = file
+                val uri = FileProvider.getUriForFile(
+                    context,
+                    "${context.packageName}.fileprovider",
+                    file
+                )
+                takePictureLauncher.launch(uri)
+            }.onFailure { err ->
+                pendingCameraFile = null
+                Toast.makeText(context, "无法启动相机: ${err.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    val triggerPhotoPicker: () -> Unit = {
+        if (!multimodalSupported) {
+            viewModel.notifyMultimodalUnavailable()
+        } else {
+            pickPhotoLauncher.launch(
+                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+            )
+        }
+    }
+
+    val triggerDocumentPicker: () -> Unit = {
+        if (!multimodalSupported) {
+            viewModel.notifyMultimodalUnavailable()
+        } else {
+            pickDocumentLauncher.launch(
+                arrayOf(
+                    "application/pdf",
+                    "application/msword",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    "application/vnd.ms-powerpoint",
+                    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    "application/epub+zip",
+                    "application/json",
+                    "text/*",
+                    "*/*"
+                )
+            )
+        }
     }
 
     // SAF Launchers for exporting Workspace Files, Chat History, and App Logs
@@ -242,9 +361,10 @@ fun FluorineWorkbenchApp(
     }
 
     val triggerShareWorkspaceFile: (WorkspaceFileArtifact) -> Unit = { artifact ->
-        val file = viewModel.resolveWorkspaceFile(artifact)
-        if (!file.exists() || !file.isFile) {
-            Toast.makeText(context, "文件不存在: ${artifact.relativePath}", Toast.LENGTH_SHORT).show()
+        val fileResult = runCatching { viewModel.resolveWorkspaceFile(artifact) }
+        val file = fileResult.getOrNull()
+        if (file == null || !file.exists() || !file.isFile) {
+            Toast.makeText(context, "文件不存在或路径受限: ${artifact.relativePath}", Toast.LENGTH_SHORT).show()
         } else {
             val text = runCatching {
                 if (file.length() <= 256 * 1024) {
@@ -279,9 +399,9 @@ fun FluorineWorkbenchApp(
                     viewModel.selectSession(id)
                     scope.launch { drawerState.close() }
                 },
-                onNewSession = {
+                onNewSession = { targetMode ->
                     dismissKeyboard()
-                    viewModel.newConversation()
+                    viewModel.newConversation(targetMode)
                     scope.launch { drawerState.close() }
                 },
                 onRenameSessionRequest = { session ->
@@ -338,16 +458,39 @@ fun FluorineWorkbenchApp(
                 )
             },
             bottomBar = {
-                ComposerBottomBar(
-                    uiState = uiState,
-                    onUpdatePrompt = viewModel::updatePromptInput,
-                    onToggleWeb = viewModel::toggleWeb,
-                    onToggleThinking = viewModel::toggleThinking,
-                    onSubmit = {
-                        dismissKeyboard()
-                        viewModel.submitPrompt()
-                    }
-                )
+                Box(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    ComposerBottomBar(
+                        uiState = uiState,
+                        multimodalSupported = multimodalSupported,
+                        showAttachmentDrawer = showAttachmentDrawer,
+                        onToggleAttachmentDrawer = {
+                            if (!multimodalSupported && !showAttachmentDrawer) {
+                                viewModel.notifyMultimodalUnavailable()
+                            } else {
+                                dismissKeyboard()
+                                showAttachmentDrawer = !showAttachmentDrawer
+                            }
+                        },
+                        onUpdatePrompt = viewModel::updatePromptInput,
+                        onToggleWeb = viewModel::toggleWeb,
+                        onToggleThinking = viewModel::toggleThinking,
+                        onPickCamera = triggerCamera,
+                        onPickPhoto = triggerPhotoPicker,
+                        onPickDocument = triggerDocumentPicker,
+                        onRemoveAttachment = viewModel::removePendingAttachment,
+                        onSetPdfParsePurpose = viewModel::setPdfParsePurpose,
+                        onSubmit = {
+                            dismissKeyboard()
+                            showAttachmentDrawer = false
+                            viewModel.submitPrompt()
+                        },
+                        onStop = viewModel::stopGeneration,
+                        modifier = Modifier.widthIn(max = 860.dp)
+                    )
+                }
             }
         ) { innerPadding ->
             Box(
@@ -367,6 +510,7 @@ fun FluorineWorkbenchApp(
                 ) {
                     ModeNavigationRow(
                         mode = uiState.mode,
+                        isBusy = uiState.isBusy,
                         onSelectMode = { mode ->
                             dismissKeyboard()
                             viewModel.setMode(mode)
@@ -670,30 +814,39 @@ private fun TopHeaderBar(
 @Composable
 private fun ModeNavigationRow(
     mode: String,
+    isBusy: Boolean,
     onSelectMode: (String) -> Unit
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 8.dp),
-        horizontalArrangement = Arrangement.Start,
+            .padding(vertical = 10.dp),
+        horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically
     ) {
         Surface(
-            shape = RoundedCornerShape(10.dp),
-            color = MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(24.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
         ) {
-            Row(modifier = Modifier.padding(3.dp)) {
+            Row(
+                modifier = Modifier.padding(4.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 ModeTabItem(
+                    icon = Icons.Outlined.ChatBubbleOutline,
                     title = stringResource(R.string.mode_chat),
                     selected = mode == "chat",
+                    enabled = !isBusy,
                     onClick = { onSelectMode("chat") },
                     testTag = "mode_chat_button"
                 )
                 ModeTabItem(
+                    icon = Icons.Outlined.Build,
                     title = stringResource(R.string.mode_work),
                     selected = mode == "work",
+                    enabled = !isBusy,
                     onClick = { onSelectMode("work") },
                     testTag = "mode_work_button"
                 )
@@ -704,8 +857,10 @@ private fun ModeNavigationRow(
 
 @Composable
 private fun ModeTabItem(
+    icon: ImageVector,
     title: String,
     selected: Boolean,
+    enabled: Boolean,
     onClick: () -> Unit,
     testTag: String
 ) {
@@ -714,59 +869,94 @@ private fun ModeTabItem(
 
     Row(
         modifier = Modifier
-            .clip(RoundedCornerShape(7.dp))
+            .clip(RoundedCornerShape(20.dp))
             .background(bg)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 24.dp, vertical = 9.dp)
             .testTag(testTag),
-        verticalAlignment = Alignment.CenterVertically
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(7.dp)
     ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            modifier = Modifier.size(16.dp),
+            tint = fg
+        )
         Text(
             text = title,
-            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
             color = fg
         )
     }
 }
 
+/**
+ * UI001-inspired clean composer bar:
+ * - Unified rounded container card (24dp corners), borderless text input
+ * - Bottom-left: Think & Search pill toggles
+ * - Bottom-right: Circular (+ / x) attachment toggle & circular Send (↑) / Stop (■) action
+ * - NO voice input button
+ * - Expandable bottom attachment tray with horizontal thumbnail strip + Add more tile + 3 cards (Camera, Photo, Document)
+ */
 @Composable
 private fun ComposerBottomBar(
     uiState: FluorineUiState,
+    multimodalSupported: Boolean,
+    showAttachmentDrawer: Boolean,
+    onToggleAttachmentDrawer: () -> Unit,
     onUpdatePrompt: (String) -> Unit,
     onToggleWeb: () -> Unit,
     onToggleThinking: () -> Unit,
-    onSubmit: () -> Unit
+    onPickCamera: () -> Unit,
+    onPickPhoto: () -> Unit,
+    onPickDocument: () -> Unit,
+    onRemoveAttachment: (String) -> Unit,
+    onSetPdfParsePurpose: (String) -> Unit,
+    onSubmit: () -> Unit,
+    onStop: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
-    Surface(
-        modifier = Modifier
+    val canSend = uiState.promptInput.isNotBlank() || uiState.pendingAttachments.isNotEmpty()
+    val hasRichDocPending = remember(uiState.pendingAttachments) {
+        uiState.pendingAttachments.any { it.kind == "document" }
+    }
+
+    Column(
+        modifier = modifier
             .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.background)
             .navigationBarsPadding()
-            .imePadding(),
-        color = MaterialTheme.colorScheme.background,
-        tonalElevation = 0.dp
+            .imePadding()
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
+        // Unified Composer Card
         Surface(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 10.dp),
-            shape = RoundedCornerShape(14.dp),
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(24.dp),
             color = MaterialTheme.colorScheme.surface,
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
         ) {
-            Column(modifier = Modifier.padding(10.dp)) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
                 OutlinedTextField(
                     value = uiState.promptInput,
                     onValueChange = onUpdatePrompt,
                     placeholder = {
                         Text(
                             text = stringResource(R.string.prompt_placeholder),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f)
                         )
                     },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(min = 52.dp, max = 160.dp)
+                        .heightIn(min = 48.dp, max = 160.dp)
                         .testTag("prompt_input"),
                     textStyle = MaterialTheme.typography.bodyLarge.copy(
                         color = MaterialTheme.colorScheme.onSurface
@@ -780,50 +970,246 @@ private fun ComposerBottomBar(
                 )
 
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 2.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    // Bottom-left Think & Search pills
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        ToggleChipButton(
-                            icon = Icons.Outlined.Language,
-                            label = stringResource(R.string.toggle_web),
-                            active = uiState.useWeb,
-                            onClick = onToggleWeb,
-                            testTag = "web_toggle_button"
-                        )
-                        ToggleChipButton(
+                        ComposerPillToggle(
                             icon = Icons.Outlined.Psychology,
                             label = stringResource(R.string.toggle_thinking),
                             active = uiState.useThinking && uiState.thinkingMode != "disabled",
                             onClick = onToggleThinking,
                             testTag = "thinking_toggle_button"
                         )
+                        ComposerPillToggle(
+                            icon = Icons.Outlined.Language,
+                            label = stringResource(R.string.toggle_web),
+                            active = uiState.useWeb,
+                            onClick = onToggleWeb,
+                            testTag = "web_toggle_button"
+                        )
                     }
 
-                    Button(
-                        onClick = onSubmit,
-                        enabled = !uiState.isBusy && uiState.promptInput.isNotBlank(),
-                        shape = RoundedCornerShape(10.dp),
-                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
-                        modifier = Modifier.testTag("send_button")
+                    // Bottom-right circular (+) / (x) and Send (↑) / Stop (■) buttons (NO voice button)
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Outlined.Send,
-                            contentDescription = stringResource(R.string.send_action),
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = if (uiState.isBusy) {
-                                stringResource(R.string.sending_action)
+                        Surface(
+                            modifier = Modifier
+                                .size(38.dp)
+                                .clip(CircleShape)
+                                .clickable(onClick = onToggleAttachmentDrawer)
+                                .testTag("attach_toggle_button"),
+                            shape = CircleShape,
+                            color = if (showAttachmentDrawer) {
+                                MaterialTheme.colorScheme.surfaceVariant
                             } else {
-                                stringResource(R.string.send_action)
+                                Color.Transparent
                             },
-                            style = MaterialTheme.typography.labelLarge
+                            border = BorderStroke(
+                                width = 1.4.dp,
+                                color = if (multimodalSupported) {
+                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f)
+                                } else {
+                                    MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)
+                                }
+                            )
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = if (showAttachmentDrawer) Icons.Outlined.Close else Icons.Outlined.Add,
+                                    contentDescription = if (showAttachmentDrawer) "收起附件面板" else "上传图片或文件",
+                                    modifier = Modifier.size(20.dp),
+                                    tint = if (multimodalSupported) {
+                                        MaterialTheme.colorScheme.onSurface
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                                    }
+                                )
+                            }
+                        }
+
+                        if (uiState.isBusy) {
+                            Surface(
+                                modifier = Modifier
+                                    .size(38.dp)
+                                    .clip(CircleShape)
+                                    .clickable(onClick = onStop)
+                                    .testTag("stop_button"),
+                                shape = CircleShape,
+                                color = MaterialTheme.colorScheme.error
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        imageVector = Icons.Outlined.Stop,
+                                        contentDescription = stringResource(R.string.stop_action),
+                                        modifier = Modifier.size(20.dp),
+                                        tint = MaterialTheme.colorScheme.onError
+                                    )
+                                }
+                            }
+                        } else {
+                            Surface(
+                                modifier = Modifier
+                                    .size(38.dp)
+                                    .clip(CircleShape)
+                                    .clickable(enabled = canSend, onClick = onSubmit)
+                                    .testTag("send_button"),
+                                shape = CircleShape,
+                                color = if (canSend) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceVariant
+                                }
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        imageVector = Icons.Outlined.ArrowUpward,
+                                        contentDescription = stringResource(R.string.send_action),
+                                        modifier = Modifier.size(20.dp),
+                                        tint = if (canSend) {
+                                            MaterialTheme.colorScheme.onPrimary
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Expandable attachment strip & 3-card drawer (UI001 bottom layout)
+        AnimatedVisibility(
+            visible = showAttachmentDrawer || uiState.pendingAttachments.isNotEmpty(),
+            enter = expandVertically() + fadeIn(),
+            exit = shrinkVertically() + fadeOut()
+        ) {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                if (showAttachmentDrawer || uiState.pendingAttachments.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (showAttachmentDrawer) {
+                            Surface(
+                                modifier = Modifier
+                                    .size(82.dp)
+                                    .clip(RoundedCornerShape(16.dp))
+                                    .clickable(onClick = onPickPhoto)
+                                    .testTag("attach_add_more_tile"),
+                                shape = RoundedCornerShape(16.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .padding(8.dp),
+                                    verticalArrangement = Arrangement.Center,
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Outlined.Add,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(22.dp),
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = stringResource(R.string.attach_add_more),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                        }
+
+                        uiState.pendingAttachments.forEach { att ->
+                            PendingAttachmentTile(
+                                attachment = att,
+                                onRemove = { onRemoveAttachment(att.id) }
+                            )
+                        }
+                    }
+                }
+
+                if (showAttachmentDrawer && hasRichDocPending) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "文档解析：",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        FilterChip(
+                            selected = uiState.pdfParsePurpose == "text_recognition",
+                            onClick = { onSetPdfParsePurpose("text_recognition") },
+                            label = { Text("纯文字", style = MaterialTheme.typography.labelSmall) }
+                        )
+                        FilterChip(
+                            selected = uiState.pdfParsePurpose == "rich_layout_recognition",
+                            onClick = { onSetPdfParsePurpose("rich_layout_recognition") },
+                            label = { Text("图文混排", style = MaterialTheme.typography.labelSmall) }
+                        )
+                    }
+                }
+
+                if (showAttachmentDrawer) {
+                    if (!multimodalSupported) {
+                        Text(
+                            text = "当前模型 (${uiState.model}) 暂不支持多模态上传；切换为 deepseek-flash 后可用",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        AttachmentSourceCard(
+                            icon = Icons.Outlined.PhotoCamera,
+                            label = stringResource(R.string.attach_camera),
+                            enabledStyle = multimodalSupported,
+                            onClick = onPickCamera,
+                            testTag = "attach_camera_card",
+                            modifier = Modifier.weight(1f)
+                        )
+                        AttachmentSourceCard(
+                            icon = Icons.Outlined.Image,
+                            label = stringResource(R.string.attach_photo),
+                            enabledStyle = multimodalSupported,
+                            onClick = onPickPhoto,
+                            testTag = "attach_photo_card",
+                            modifier = Modifier.weight(1f)
+                        )
+                        AttachmentSourceCard(
+                            icon = Icons.Outlined.AttachFile,
+                            label = stringResource(R.string.attach_document),
+                            enabledStyle = multimodalSupported,
+                            onClick = onPickDocument,
+                            testTag = "attach_document_card",
+                            modifier = Modifier.weight(1f)
                         )
                     }
                 }
@@ -833,8 +1219,133 @@ private fun ComposerBottomBar(
 }
 
 @Composable
-private fun ToggleChipButton(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+private fun PendingAttachmentTile(
+    attachment: ChatAttachment,
+    onRemove: () -> Unit
+) {
+    val thumb = if (attachment.kind == "image" && attachment.localPath.isNotBlank()) {
+        loadThumbnailBitmap(attachment.localPath, 220)
+    } else {
+        null
+    }
+
+    Box(modifier = Modifier.size(82.dp)) {
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+        ) {
+            if (thumb != null) {
+                Image(
+                    bitmap = thumb,
+                    contentDescription = attachment.name,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(8.dp),
+                    verticalArrangement = Arrangement.Center,
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Description,
+                        contentDescription = null,
+                        modifier = Modifier.size(22.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = attachment.name,
+                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        }
+
+        Surface(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(4.dp)
+                .size(22.dp)
+                .clip(CircleShape)
+                .clickable(onClick = onRemove),
+            shape = CircleShape,
+            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f)
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(
+                    imageVector = Icons.Outlined.Close,
+                    contentDescription = "移除附件",
+                    modifier = Modifier.size(14.dp),
+                    tint = MaterialTheme.colorScheme.onSurface
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun AttachmentSourceCard(
+    icon: ImageVector,
+    label: String,
+    enabledStyle: Boolean,
+    onClick: () -> Unit,
+    testTag: String,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier
+            .height(82.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .clickable(onClick = onClick)
+            .testTag(testTag),
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = if (enabledStyle) 0.78f else 0.38f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 8.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = label,
+                modifier = Modifier.size(24.dp),
+                tint = if (enabledStyle) {
+                    MaterialTheme.colorScheme.onSurface
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
+                }
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelLarge,
+                color = if (enabledStyle) {
+                    MaterialTheme.colorScheme.onSurface
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
+                },
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
+private fun ComposerPillToggle(
+    icon: ImageVector,
     label: String,
     active: Boolean,
     onClick: () -> Unit,
@@ -843,7 +1354,7 @@ private fun ToggleChipButton(
     val bg = if (active) {
         MaterialTheme.colorScheme.secondaryContainer
     } else {
-        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+        Color.Transparent
     }
     val fg = if (active) {
         MaterialTheme.colorScheme.primary
@@ -858,27 +1369,27 @@ private fun ToggleChipButton(
 
     Surface(
         modifier = Modifier
-            .clip(RoundedCornerShape(7.dp))
+            .clip(RoundedCornerShape(20.dp))
             .clickable(onClick = onClick)
             .testTag(testTag),
-        shape = RoundedCornerShape(7.dp),
+        shape = RoundedCornerShape(20.dp),
         color = bg,
         border = BorderStroke(1.dp, border)
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+            modifier = Modifier.padding(horizontal = 13.dp, vertical = 7.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             Icon(
                 imageVector = icon,
                 contentDescription = null,
-                modifier = Modifier.size(14.dp),
+                modifier = Modifier.size(16.dp),
                 tint = fg
             )
             Text(
                 text = label,
-                style = MaterialTheme.typography.labelSmall,
+                style = MaterialTheme.typography.labelLarge,
                 color = fg
             )
         }

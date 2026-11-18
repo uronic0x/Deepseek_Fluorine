@@ -125,16 +125,28 @@ fun MarkdownMathText(
     }
 }
 
-private fun injectInlineCitations(text: String, citations: List<CitationPoint>): String {
+internal fun injectInlineCitations(text: String, citations: List<CitationPoint>): String {
     if (citations.isEmpty() || text.isEmpty()) return text
-    val valid = citations
-        .filter { it.offset in 0..text.length && it.indexes.isNotEmpty() }
-        .sortedByDescending { it.offset }
-    if (valid.isEmpty()) return text
+    val totalCodePoints = text.codePointCount(0, text.length)
+    val mapped = citations.mapNotNull { pt ->
+        if (pt.indexes.isEmpty()) return@mapNotNull null
+        val charOffset = if (pt.endIndex >= 0) {
+            val cp = pt.endIndex.coerceIn(0, totalCodePoints)
+            text.offsetByCodePoints(0, cp)
+        } else {
+            pt.offset.coerceIn(0, text.length)
+        }
+        Triple(charOffset, pt.indexes, pt.url)
+    }.sortedByDescending { it.first }
+    if (mapped.isEmpty()) return text
     val sb = StringBuilder(text)
-    for (pt in valid) {
-        val badge = pt.indexes.joinToString("") { "[$it]" }
-        sb.insert(pt.offset.coerceIn(0, sb.length), badge)
+    for ((charPos, indexes, url) in mapped) {
+        val badge = if (url.isNotBlank()) {
+            indexes.joinToString("") { "[[$it]]($url)" }
+        } else {
+            indexes.joinToString("") { "[$it]" }
+        }
+        sb.insert(charPos.coerceIn(0, sb.length), badge)
     }
     return sb.toString()
 }
