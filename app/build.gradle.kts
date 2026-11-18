@@ -1,9 +1,34 @@
 import java.io.File
+import java.util.Properties
 
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
     // alias(libs.plugins.kotlin.serialization)
+}
+
+// Release signing is loaded from a properties file that lives OUTSIDE the repo.
+// Resolution order:
+//   1) system property / env  FLUORINE_KEYSTORE_PROPERTIES  -> absolute path to keystore.properties
+//   2) local.properties key    fluorine.keystoreProperties -> absolute path to keystore.properties
+// The keystore.properties itself is never committed (contains store/key passwords).
+val releaseKeystoreProps: Properties? = run {
+    val explicit = System.getenv("FLUORINE_KEYSTORE_PROPERTIES")
+        ?: System.getProperty("FLUORINE_KEYSTORE_PROPERTIES")
+    val fromLocal = runCatching {
+        val f = rootProject.file("local.properties")
+        if (f.exists()) {
+            Properties().apply { f.inputStream().use { load(it) } }
+                .getProperty("fluorine.keystoreProperties")
+        } else null
+    }.getOrNull()
+    val path = explicit ?: fromLocal
+    if (path.isNullOrBlank()) {
+        null
+    } else {
+        val pf = File(path)
+        if (pf.exists()) Properties().apply { pf.inputStream().use { load(it) } } else null
+    }
 }
 
 android {
@@ -28,12 +53,26 @@ android {
         getByName("debug") {
             // Use AGP's default debug keystore (auto-generated in ~/.android/debug.keystore).
         }
+        create("release") {
+            val props = releaseKeystoreProps
+            if (props != null) {
+                storeFile = props.getProperty("storeFile")?.let { File(it) }
+                storePassword = props.getProperty("storePassword")
+                keyAlias = props.getProperty("keyAlias")
+                keyPassword = props.getProperty("keyPassword")
+            }
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
+            signingConfig = if (releaseKeystoreProps != null) {
+                signingConfigs.getByName("release")
+            } else {
+                null // produce unsigned release if keystore not configured
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
