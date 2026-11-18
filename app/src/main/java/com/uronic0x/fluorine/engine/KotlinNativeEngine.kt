@@ -568,50 +568,54 @@ object KotlinNativeEngine {
                 setRequestProperty("Authorization", "Bearer ${apiKey.trim()}")
                 setRequestProperty("Accept", "application/json")
             }
-            val status = conn.responseCode
-            val stream = if (status in 200..299) conn.inputStream else conn.errorStream
-            val body = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
-            if (status !in 200..299) {
-                CoreProtocol.AppLogger.warn("Engine", "discoverCapabilities HTTP $status ($normalizedUrl)")
-                return JSONObject()
-                    .put("ok", false)
-                    .put("status", status)
-                    .put("error", extractUpstreamError(body, status))
-                    .toString()
-            }
-            val parsed = runCatching { JSONObject(body) }.getOrNull()
-            val modelsArr = parsed?.optJSONArray("data") ?: JSONArray()
-            val modelIds = JSONArray()
-            val modelsDetail = JSONArray()
-            for (i in 0 until modelsArr.length()) {
-                val m = modelsArr.optJSONObject(i) ?: continue
-                val id = m.optString("id", "")
-                if (id.isBlank()) continue
-                modelIds.put(id)
-                val fallback = CoreProtocol.DEFAULT_MODEL_CAPABILITIES[id]
-                val modalitiesArr = m.optJSONArray("input_modalities") ?: JSONArray().apply {
-                    fallback?.inputModalities?.forEach { put(it) }
+            try {
+                val status = conn.responseCode
+                val stream = if (status in 200..299) conn.inputStream else conn.errorStream
+                val body = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
+                if (status !in 200..299) {
+                    CoreProtocol.AppLogger.warn("Engine", "discoverCapabilities HTTP $status ($normalizedUrl)")
+                    return JSONObject()
+                        .put("ok", false)
+                        .put("status", status)
+                        .put("error", extractUpstreamError(body, status))
+                        .toString()
                 }
-                modelsDetail.put(
-                    JSONObject()
-                        .put("id", id)
-                        .put("name", m.optString("name", fallback?.name ?: id))
-                        .put("context_window", m.optInt("context_window", fallback?.contextWindow ?: 0))
-                        .put("max_output_tokens", m.optInt("max_output_tokens", fallback?.maxOutputTokens ?: 0))
-                        .put("input_modalities", modalitiesArr)
-                )
+                val parsed = runCatching { JSONObject(body) }.getOrNull()
+                val modelsArr = parsed?.optJSONArray("data") ?: JSONArray()
+                val modelIds = JSONArray()
+                val modelsDetail = JSONArray()
+                for (i in 0 until modelsArr.length()) {
+                    val m = modelsArr.optJSONObject(i) ?: continue
+                    val id = m.optString("id", "")
+                    if (id.isBlank()) continue
+                    modelIds.put(id)
+                    val fallback = CoreProtocol.DEFAULT_MODEL_CAPABILITIES[id]
+                    val modalitiesArr = m.optJSONArray("input_modalities") ?: JSONArray().apply {
+                        fallback?.inputModalities?.forEach { put(it) }
+                    }
+                    modelsDetail.put(
+                        JSONObject()
+                            .put("id", id)
+                            .put("name", m.optString("name", fallback?.name ?: id))
+                            .put("context_window", m.optInt("context_window", fallback?.contextWindow ?: 0))
+                            .put("max_output_tokens", m.optInt("max_output_tokens", fallback?.maxOutputTokens ?: 0))
+                            .put("input_modalities", modalitiesArr)
+                    )
+                }
+                CoreProtocol.AppLogger.info("Engine", "discoverCapabilities OK: ${modelIds.length()} models from $normalizedUrl")
+                JSONObject()
+                    .put("ok", true)
+                    .put("base_url", normalizedUrl)
+                    .put("models", modelIds)
+                    .put("models_detail", modelsDetail)
+                    .put(
+                        "local_tools",
+                        JSONArray(DeterministicTools.TOOL_NAMES + AndroidHarnessTools.TOOL_NAMES)
+                    )
+                    .toString()
+            } finally {
+                conn.disconnect()
             }
-            CoreProtocol.AppLogger.info("Engine", "discoverCapabilities OK: ${modelIds.length()} models from $normalizedUrl")
-            JSONObject()
-                .put("ok", true)
-                .put("base_url", normalizedUrl)
-                .put("models", modelIds)
-                .put("models_detail", modelsDetail)
-                .put(
-                    "local_tools",
-                    JSONArray(DeterministicTools.TOOL_NAMES + AndroidHarnessTools.TOOL_NAMES)
-                )
-                .toString()
         } catch (e: Exception) {
             CoreProtocol.AppLogger.error("Engine", "discoverCapabilities error: ${e.message}")
             JSONObject()
@@ -757,11 +761,7 @@ object KotlinNativeEngine {
                     payload = payload,
                     handle = handle,
                     onThinkingDelta = { delta ->
-                        if (aggregatedThinking.isEmpty() || rounds == 1) {
-                            aggregatedThinking.append(delta)
-                        } else {
-                            aggregatedThinking.append(delta)
-                        }
+                        aggregatedThinking.append(delta)
                         emit(StreamUiEvent.ThinkingDelta(delta))
                     },
                     onContentDelta = { delta ->
@@ -777,7 +777,7 @@ object KotlinNativeEngine {
                 var sourcesAdded = false
                 for (i in 0 until roundSources.length()) {
                     val s = roundSources.optJSONObject(i) ?: continue
-                    val key = "${s.optString("url")}|${s.optString("title")}|${s.optInt("cite_index", -1)}"
+                    val key = "${s.optString("url")}|${s.optString("title")}"
                     if (seenSourceKeys.add(key)) {
                         aggregatedSources.put(s)
                         sourcesAdded = true
@@ -1432,7 +1432,11 @@ object KotlinNativeEngine {
     }
 
     private class UsageAccumulator {
-        var promptTokens: Int = 0
+        var lastPromptTokens: Int = 0
+        var lastCompletionTokens: Int = 0
+        var lastCacheHitTokens: Int = 0
+        var lastCacheMissTokens: Int = 0
+        var cumulativePromptTokens: Int = 0
         var completionTokens: Int = 0
         var totalTokens: Int = 0
         var cacheHitTokens: Int = 0
@@ -1441,11 +1445,24 @@ object KotlinNativeEngine {
         var readUrlReqs: Int = 0
 
         fun add(u: JSONObject) {
-            promptTokens += u.optInt("prompt_tokens", 0)
-            completionTokens += u.optInt("completion_tokens", 0)
-            totalTokens += u.optInt("total_tokens", 0)
-            cacheHitTokens += u.optInt("prompt_cache_hit_tokens", 0)
-            cacheMissTokens += u.optInt("prompt_cache_miss_tokens", 0)
+            val p = u.optInt("prompt_tokens", 0)
+            val c = u.optInt("completion_tokens", 0)
+            val hit = u.optInt("prompt_cache_hit_tokens", 0)
+            val miss = u.optInt("prompt_cache_miss_tokens", 0)
+            val t = u.optInt("total_tokens", p + c)
+            if (p > 0) {
+                lastPromptTokens = p
+                lastCompletionTokens = c
+                lastCacheHitTokens = hit
+                lastCacheMissTokens = miss
+            } else if (c > 0 && lastPromptTokens == 0) {
+                lastCompletionTokens += c
+            }
+            cumulativePromptTokens += p
+            completionTokens += c
+            totalTokens += t
+            cacheHitTokens += hit
+            cacheMissTokens += miss
             u.optJSONObject("server_tool_use")?.let { stu ->
                 webSearchReqs += stu.optInt("web_search_requests", 0) + stu.optInt("tool_search", 0)
                 readUrlReqs += stu.optInt("read_url_requests", 0) + stu.optInt("tool_fetch", 0)
@@ -1453,12 +1470,25 @@ object KotlinNativeEngine {
         }
 
         fun toJson(): JSONObject {
+            val effectivePrompt = if (lastPromptTokens > 0) lastPromptTokens else cumulativePromptTokens
+            val contextTokens = if (lastPromptTokens > 0) {
+                lastPromptTokens + lastCompletionTokens
+            } else {
+                effectivePrompt + completionTokens
+            }
+            val effectiveHit = if (lastPromptTokens > 0) lastCacheHitTokens else cacheHitTokens
+            val effectiveMiss = if (lastPromptTokens > 0) lastCacheMissTokens else cacheMissTokens
             val obj = JSONObject()
-                .put("prompt_tokens", promptTokens)
+                .put("prompt_tokens", effectivePrompt)
                 .put("completion_tokens", completionTokens)
-                .put("total_tokens", totalTokens)
-                .put("prompt_cache_hit_tokens", cacheHitTokens)
-                .put("prompt_cache_miss_tokens", cacheMissTokens)
+                .put("total_tokens", effectivePrompt + completionTokens)
+                .put("context_tokens", contextTokens)
+                .put("cumulative_prompt_tokens", cumulativePromptTokens)
+                .put("cumulative_total_tokens", totalTokens)
+                .put("prompt_cache_hit_tokens", effectiveHit)
+                .put("prompt_cache_miss_tokens", effectiveMiss)
+                .put("cumulative_cache_hit_tokens", cacheHitTokens)
+                .put("cumulative_cache_miss_tokens", cacheMissTokens)
             if (webSearchReqs > 0 || readUrlReqs > 0) {
                 obj.put(
                     "server_tool_use",

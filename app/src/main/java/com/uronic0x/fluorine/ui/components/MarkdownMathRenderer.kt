@@ -353,7 +353,7 @@ internal fun parseMarkdownBlocks(
                 continue
             }
 
-            val envMatch = Regex("""^\\begin\{(equation\*?|align\*?|aligned|gather\*?|math|displaymath|pmatrix|bmatrix|matrix|vmatrix|cases)\}""").find(trimmed)
+            val envMatch = MD_LATEX_ENV_BEGIN_REGEX.find(trimmed)
             if (envMatch != null) {
                 val envName = envMatch.groupValues[1]
                 val endTag = "\\end{$envName}"
@@ -370,14 +370,14 @@ internal fun parseMarkdownBlocks(
         }
 
         // 3. Horizontal Rule
-        if (Regex("""^(\*{3,}|-{3,}|_{3,})$""").matches(trimmed)) {
+        if (MD_HR_REGEX.matches(trimmed)) {
             blocks.add(MdBlock.Divider)
             i++
             continue
         }
 
         // 4. Heading (# .. ######)
-        val headingMatch = Regex("""^(#{1,6})\s+(.+)$""").find(trimmed)
+        val headingMatch = MD_HEADING_REGEX.find(trimmed)
         if (headingMatch != null) {
             val level = headingMatch.groupValues[1].length
             val content = headingMatch.groupValues[2].trim()
@@ -389,7 +389,7 @@ internal fun parseMarkdownBlocks(
         // 5. Pipe Table
         if (trimmed.startsWith("|") && trimmed.endsWith("|") && i + 1 < lines.size) {
             val nextTrimmed = lines[i + 1].trim()
-            if (nextTrimmed.startsWith("|") && Regex("""^\|[\s:|-]+\|$""").matches(nextTrimmed)) {
+            if (nextTrimmed.startsWith("|") && MD_TABLE_SEP_REGEX.matches(nextTrimmed)) {
                 val headers = parseTableCells(trimmed)
                 val rows = mutableListOf<List<String>>()
                 i += 2
@@ -449,12 +449,12 @@ internal fun parseMarkdownBlocks(
                     curTrim.startsWith("```") ||
                         curTrim.startsWith("~~~") ||
                         (enableLatex && (curTrim.startsWith("$$") || curTrim.startsWith("\\["))) ||
-                        Regex("""^(#{1,6})\s+""").containsMatchIn(curTrim) ||
-                        Regex("""^(\*{3,}|-{3,}|_{3,})$""").matches(curTrim) ||
+                        MD_HEADING_PREFIX_REGEX.containsMatchIn(curTrim) ||
+                        MD_HR_REGEX.matches(curTrim) ||
                         curTrim.startsWith(">") ||
                         matchListItem(cur) != null ||
                         (curTrim.startsWith("|") && curTrim.endsWith("|") && i + 1 < lines.size &&
-                            Regex("""^\|[\s:|-]+\|$""").matches(lines[i + 1].trim()))
+                            MD_TABLE_SEP_REGEX.matches(lines[i + 1].trim()))
                     )
             ) {
                 break
@@ -507,12 +507,26 @@ private fun parseTableCells(line: String): List<String> {
         .map { it.trim() }
 }
 
+private val MD_LATEX_ENV_BEGIN_REGEX =
+    Regex("""^\\begin\{(equation\*?|align\*?|aligned|gather\*?|math|displaymath|pmatrix|bmatrix|matrix|vmatrix|cases)\}""")
+private val MD_HR_REGEX = Regex("""^(\*{3,}|-{3,}|_{3,})$""")
+private val MD_HEADING_REGEX = Regex("""^(#{1,6})\s+(.+)$""")
+private val MD_HEADING_PREFIX_REGEX = Regex("""^(#{1,6})\s+""")
+private val MD_TABLE_SEP_REGEX = Regex("""^\|[\s:|-]+\|$""")
+private val MD_TASK_ITEM_REGEX = Regex("""^[-*+]\s+\[([ xX])\]\s+(.+)$""")
+private val MD_UL_ITEM_REGEX = Regex("""^([-*+•])\s+(.+)$""")
+private val MD_OL_ITEM_REGEX = Regex("""^(\d+\.)\s+(.+)$""")
+private val LATEX_STRIP_BEGIN_REGEX =
+    Regex("""^\\begin\{(equation\*?|align\*?|aligned|gather\*?|math|displaymath)\}""")
+private val LATEX_STRIP_END_REGEX =
+    Regex("""\\end\{(equation\*?|align\*?|aligned|gather\*?|math|displaymath)\}$""")
+
 private fun matchListItem(line: String): MdListItem? {
     val leadingSpaces = line.takeWhile { it == ' ' || it == '\t' }.length
     val indent = (leadingSpaces / 2).coerceIn(0, 4)
     val trimmed = line.trim()
 
-    val taskMatch = Regex("""^[-*+]\s+\[([ xX])\]\s+(.+)$""").find(trimmed)
+    val taskMatch = MD_TASK_ITEM_REGEX.find(trimmed)
     if (taskMatch != null) {
         val checked = taskMatch.groupValues[1].equals("x", ignoreCase = true)
         return MdListItem(
@@ -523,7 +537,7 @@ private fun matchListItem(line: String): MdListItem? {
         )
     }
 
-    val ulMatch = Regex("""^([-*+•])\s+(.+)$""").find(trimmed)
+    val ulMatch = MD_UL_ITEM_REGEX.find(trimmed)
     if (ulMatch != null) {
         return MdListItem(
             bullet = "•",
@@ -532,7 +546,7 @@ private fun matchListItem(line: String): MdListItem? {
         )
     }
 
-    val olMatch = Regex("""^(\d+\.)\s+(.+)$""").find(trimmed)
+    val olMatch = MD_OL_ITEM_REGEX.find(trimmed)
     if (olMatch != null) {
         return MdListItem(
             bullet = olMatch.groupValues[1],
@@ -1310,8 +1324,8 @@ fun MathFormulaView(
 
 private fun splitTopLevelLatexLines(latex: String): List<String> {
     val cleaned = latex.trim()
-        .replace(Regex("""^\\begin\{(equation\*?|align\*?|aligned|gather\*?|math|displaymath)\}"""), "")
-        .replace(Regex("""\\end\{(equation\*?|align\*?|aligned|gather\*?|math|displaymath)\}$"""), "")
+        .replace(LATEX_STRIP_BEGIN_REGEX, "")
+        .replace(LATEX_STRIP_END_REGEX, "")
         .trim()
     if (cleaned.startsWith("\\begin{")) {
         return listOf(cleaned)

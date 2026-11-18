@@ -434,8 +434,9 @@ private fun SessionListItem(
         SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(session.updatedAt))
     }
     val msgCount = session.chatMessages.size
-    val preview = remember(session.chatMessages) {
-        session.chatMessages.lastOrNull()?.text?.replace('\n', ' ')?.take(48).orEmpty()
+    val lastMsg = session.chatMessages.lastOrNull()
+    val preview = remember(session.id, msgCount, lastMsg?.id, lastMsg?.text?.length) {
+        lastMsg?.text?.take(96)?.replace('\n', ' ')?.trim()?.take(48).orEmpty()
     }
 
     Surface(
@@ -698,6 +699,118 @@ fun RenameSessionDialog(
                         }
                     ) {
                         Text(stringResource(R.string.settings_save))
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun DeleteSessionConfirmDialog(
+    session: ConversationSession,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.surface,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = "删除会话确认",
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = "确定要删除会话「${session.title.ifBlank { "新对话" }}」（共 ${session.chatMessages.size} 条消息）吗？此操作不可恢复。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.testTag("cancel_delete_session_button")
+                    ) {
+                        Text(stringResource(R.string.settings_cancel))
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Button(
+                        onClick = onConfirm,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.error,
+                            contentColor = MaterialTheme.colorScheme.onError
+                        ),
+                        modifier = Modifier.testTag("confirm_delete_session_button")
+                    ) {
+                        Text("确认删除")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun ClearAllSessionsConfirmDialog(
+    sessionCount: Int,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.surface,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = "清空全部会话确认",
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = "确定要永久清空全部 $sessionCount 个会话记录吗？建议先导出 JSON 或 Markdown 备份，此操作不可恢复。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.testTag("cancel_clear_all_sessions_button")
+                    ) {
+                        Text(stringResource(R.string.settings_cancel))
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Button(
+                        onClick = onConfirm,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.error,
+                            contentColor = MaterialTheme.colorScheme.onError
+                        ),
+                        modifier = Modifier.testTag("confirm_clear_all_sessions_button")
+                    ) {
+                        Text("确认清空")
                     }
                 }
             }

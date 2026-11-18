@@ -484,4 +484,75 @@ class FluorineProtocolAndToolsTest {
         assertNotNull(mathNode)
         assertTrue(mathNode is MathNode.Fraction)
     }
+
+    @Test
+    fun normalizeRestoredSessionsPrunesAccumulatedBlankSessionsAndRestoresActiveId() {
+        val blank1 = ConversationSession(
+            id = "blank-1",
+            title = "新对话",
+            mode = "chat",
+            createdAt = 1000L,
+            updatedAt = 1000L
+        )
+        val blank2 = ConversationSession(
+            id = "blank-2",
+            title = "新 Work 任务",
+            mode = "work",
+            createdAt = 1100L,
+            updatedAt = 1100L
+        )
+        val activeReal = ConversationSession(
+            id = "real-1",
+            title = "排查启动空白会话漏洞",
+            mode = "chat",
+            createdAt = 1200L,
+            updatedAt = 2000L,
+            chatMessages = listOf(ChatMessage(id = "m1", role = "user", text = "分析原因")),
+            contextHistory = listOf(ContextTurn(role = "user", content = "分析原因"))
+        )
+
+        val json = CoreProtocol.serializeSessionsStore(listOf(blank1, blank2, activeReal), "blank-1")
+        val (restored, activeId) = CoreProtocol.deserializeSessionsStore(json)
+        assertEquals(1, restored.size)
+        assertEquals("real-1", restored[0].id)
+        assertEquals("real-1", activeId)
+
+        // When only blank sessions exist, keep a single blank session instead of accumulating
+        val allBlankJson = CoreProtocol.serializeSessionsStore(listOf(blank1, blank2), "blank-2")
+        val (blankRestored, blankActiveId) = CoreProtocol.deserializeSessionsStore(allBlankJson)
+        assertEquals(1, blankRestored.size)
+        assertEquals("blank-2", blankRestored[0].id)
+        assertEquals("blank-2", blankActiveId)
+    }
+
+    @Test
+    fun parseEngineTurnResultDistinguishesContextTokensFromCumulativePromptTokens() {
+        val raw = """
+            {
+              "ok": true,
+              "content": "完成多轮工具调用",
+              "finish_reason": "stop",
+              "rounds": 3,
+              "usage": {
+                "prompt_tokens": 1800,
+                "context_tokens": 2050,
+                "cumulative_prompt_tokens": 5200,
+                "completion_tokens": 450,
+                "total_tokens": 2250,
+                "prompt_cache_hit_tokens": 1600,
+                "prompt_cache_miss_tokens": 200
+              }
+            }
+        """.trimIndent()
+        val parsed = CoreProtocol.parseEngineTurnResult(raw)
+        assertTrue(parsed.ok)
+        assertEquals(1800, parsed.promptTokens)
+        assertEquals(2050, parsed.contextTokens)
+        assertEquals(5200, parsed.cumulativePromptTokens)
+        assertEquals(450, parsed.completionTokens)
+        assertTrue(parsed.usageText.contains("上下文 2050 (累计输入 5200)"))
+        assertTrue(parsed.usageText.contains("输出 450 tokens"))
+        assertTrue(parsed.usageText.contains("缓存命中 1600 · 88%"))
+    }
 }
+

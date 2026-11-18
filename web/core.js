@@ -183,9 +183,16 @@ export function estimateCostUsd(model, u, date = new Date()) {
     model === 'deepseek-v4-pro'
       ? { hit: 0.022 * peak, miss: 0.66 * peak, out: 1.98 * peak }
       : { hit: 0.003 * peak, miss: 0.15 * peak, out: 0.6 * peak };
-  const prompt = u.prompt_tokens ?? u.input_tokens ?? 0;
-  const hit = u.prompt_cache_hit_tokens ?? u.cache_read_input_tokens ?? 0;
-  const miss = u.prompt_cache_miss_tokens ?? Math.max(0, prompt - hit);
+  const prompt = u.cumulative_prompt_tokens ?? u.prompt_tokens ?? u.input_tokens ?? 0;
+  const hit =
+    u.cumulative_cache_hit_tokens ??
+    u.prompt_cache_hit_tokens ??
+    u.cache_read_input_tokens ??
+    0;
+  const miss =
+    u.cumulative_cache_miss_tokens ??
+    u.prompt_cache_miss_tokens ??
+    Math.max(0, prompt - hit);
   const out = u.completion_tokens ?? u.output_tokens ?? 0;
   const tools = u.server_tool_use || {};
   const webCost =
@@ -402,8 +409,20 @@ export async function readCompletion(response, onUpdate = () => {}) {
 
 export function usageText(u, model = 'deepseek-flash') {
   if (!u) return '上游未返回完整用量';
+  const prompt = u.prompt_tokens ?? u.input_tokens ?? '—';
+  const out = u.completion_tokens ?? u.output_tokens ?? '—';
+  const ctx =
+    Number.isFinite(u.context_tokens) && u.context_tokens > 0
+      ? ` · 上下文 ${u.context_tokens}${
+          Number.isFinite(u.cumulative_prompt_tokens) &&
+          Number.isFinite(prompt) &&
+          u.cumulative_prompt_tokens > prompt
+            ? ` (累计输入 ${u.cumulative_prompt_tokens})`
+            : ''
+        }`
+      : '';
   const tools = u.server_tool_use || {};
   const cost = estimateCostUsd(model, u);
   const costStr = cost !== null ? ` · 约 $${cost.toFixed(5)}` : '';
-  return `输入 ${u.prompt_tokens ?? u.input_tokens ?? '—'} · 输出 ${u.completion_tokens ?? u.output_tokens ?? '—'} tokens · 搜索 ${tools.tool_search ?? 0} · 读页 ${tools.tool_fetch ?? 0}${costStr}`;
+  return `输入 ${prompt} · 输出 ${out} tokens${ctx} · 搜索 ${tools.tool_search ?? 0} · 读页 ${tools.tool_fetch ?? 0}${costStr}`;
 }

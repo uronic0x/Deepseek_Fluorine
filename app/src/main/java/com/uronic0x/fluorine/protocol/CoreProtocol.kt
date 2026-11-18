@@ -269,6 +269,8 @@ data class EngineTurnResult(
     val usageText: String = "",
     val promptTokens: Int = 0,
     val completionTokens: Int = 0,
+    val contextTokens: Int = 0,
+    val cumulativePromptTokens: Int = 0,
     val cacheHitTokens: Int = 0,
     val cacheMissTokens: Int = 0,
     val serverToolUseCount: Int = 0,
@@ -429,6 +431,10 @@ object CoreProtocol {
             val usage = obj.optJSONObject("usage")
             val promptTokens = usage?.optInt("prompt_tokens", 0) ?: 0
             val completionTokens = usage?.optInt("completion_tokens", 0) ?: 0
+            val contextTokens = usage?.optInt("context_tokens", 0)
+                ?.takeIf { it > 0 } ?: (promptTokens + completionTokens)
+            val cumulativePromptTokens = usage?.optInt("cumulative_prompt_tokens", 0)
+                ?.takeIf { it > 0 } ?: promptTokens
             val cacheHitTokens = usage?.optInt("prompt_cache_hit_tokens", 0) ?: 0
             val cacheMissTokens = usage?.optInt("prompt_cache_miss_tokens", 0) ?: 0
             val serverToolUse = usage?.optJSONObject("server_tool_use")?.let { stu ->
@@ -445,6 +451,12 @@ object CoreProtocol {
                         append(" (缓存命中 $cacheHitTokens · $pct%)")
                     }
                     append(" · 输出 $completionTokens tokens")
+                    if ((rounds > 1 || cumulativePromptTokens > promptTokens) && contextTokens > 0) {
+                        append(" · 上下文 $contextTokens")
+                        if (cumulativePromptTokens > promptTokens) {
+                            append(" (累计输入 $cumulativePromptTokens)")
+                        }
+                    }
                 }
                 if (serverToolUse > 0) {
                     if (isNotEmpty()) append(" · ")
@@ -484,6 +496,8 @@ object CoreProtocol {
                 usageText = usageText,
                 promptTokens = promptTokens,
                 completionTokens = completionTokens,
+                contextTokens = contextTokens,
+                cumulativePromptTokens = cumulativePromptTokens,
                 cacheHitTokens = cacheHitTokens,
                 cacheMissTokens = cacheMissTokens,
                 serverToolUseCount = serverToolUse,
@@ -686,15 +700,51 @@ object CoreProtocol {
         }
     }
 
+    fun defaultSessionTitleForMode(mode: String): String =
+        if (mode.trim().lowercase(Locale.ROOT) == "work") "新 Work 任务" else "新对话"
+
+    fun isUntouchedBlankSession(session: ConversationSession): Boolean {
+        if (session.chatMessages.isNotEmpty() || session.contextHistory.isNotEmpty()) return false
+        val t = session.title.trim()
+        return t.isEmpty() || t == "新对话" || t == "新 Work 任务" || t == "默认会话" || t == "未命名会话"
+    }
+
+    /**
+     * Normalizes restored sessions from disk:
+     * - Deduplicates by session ID while preserving order.
+     * - Drops accumulated untouched blank sessions when at least one non-empty (or user-renamed) session exists.
+     * - Collapses multiple untouched blank sessions down to a single session when all sessions are blank.
+     * - Resolves the active session ID to `savedActiveId` if present, otherwise the most recently updated session.
+     */
+    fun normalizeRestoredSessions(
+        sessions: List<ConversationSession>,
+        savedActiveId: String?
+    ): Pair<List<ConversationSession>, String?> {
+        if (sessions.isEmpty()) return emptyList<ConversationSession>() to null
+        val deduped = sessions.distinctBy { it.id }
+        val nonBlank = deduped.filterNot { isUntouchedBlankSession(it) }
+        val cleaned = if (nonBlank.isNotEmpty()) {
+            nonBlank
+        } else {
+            val preferredBlank = deduped.firstOrNull { it.id == savedActiveId } ?: deduped.first()
+            listOf(preferredBlank)
+        }
+        val resolvedActiveId = cleaned.firstOrNull { it.id == savedActiveId }?.id
+            ?: cleaned.maxByOrNull { it.updatedAt }?.id
+            ?: cleaned.first().id
+        return cleaned to resolvedActiveId
+    }
+
     fun serializeSessionsStore(
         sessions: List<ConversationSession>,
         activeSessionId: String
     ): String {
+        val (cleanedSessions, resolvedActiveId) = normalizeRestoredSessions(sessions, activeSessionId)
         val root = JSONObject()
         root.put("version", 3)
-        root.put("active_session_id", activeSessionId)
+        root.put("active_session_id", resolvedActiveId ?: activeSessionId)
         val sessionsArr = JSONArray()
-        for (s in sessions) {
+        for (s in cleanedSessions) {
             sessionsArr.put(serializeSingleSessionObject(s))
         }
         root.put("sessions", sessionsArr)
@@ -712,7 +762,7 @@ object CoreProtocol {
                 val obj = sessionsArr.optJSONObject(i) ?: continue
                 sessions.add(deserializeSingleSessionObject(obj))
             }
-            sessions to activeId
+            normalizeRestoredSessions(sessions, activeId)
         } catch (_: Exception) {
             emptyList<ConversationSession>() to null
         }

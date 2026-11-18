@@ -13,6 +13,7 @@ import {
   slugifyAppName,
   sourceList,
   supportsMultimodal,
+  usageText,
 } from '../web/core.js';
 
 test('tool round settings accept the expanded range and bound invalid input', () => {
@@ -236,3 +237,25 @@ test('sourceList deduplicates URLs', () => {
   };
   assert.equal(sourceList(msg).length, 1);
 });
+
+test('usageText and estimateCostUsd separate actual context length from multi-round cumulative input', () => {
+  const peak = new Date('2026-11-16T02:00:00Z'); // Monday 02:00 UTC
+  const usage = {
+    prompt_tokens: 1800,
+    context_tokens: 2050,
+    cumulative_prompt_tokens: 5200,
+    completion_tokens: 450,
+    prompt_cache_hit_tokens: 1600,
+    prompt_cache_miss_tokens: 200,
+    cumulative_cache_hit_tokens: 4000,
+    cumulative_cache_miss_tokens: 1200,
+  };
+  const text = usageText(usage, 'deepseek-flash');
+  assert.match(text, /上下文 2050 \(累计输入 5200\)/);
+  assert.match(text, /输出 450 tokens/);
+
+  const cost = estimateCostUsd('deepseek-flash', usage, peak);
+  const expectedCost = (4000 * 0.006 + 1200 * 0.30 + 450 * 1.20) / 1_000_000;
+  assert.ok(Math.abs(cost - expectedCost) < 1e-12);
+});
+

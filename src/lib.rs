@@ -33,7 +33,11 @@ pub trait EventSink {
 
 #[derive(Default)]
 struct UsageAcc {
-    prompt_tokens: u64,
+    last_prompt_tokens: u64,
+    last_completion_tokens: u64,
+    last_cache_hit: u64,
+    last_cache_miss: u64,
+    cumulative_prompt_tokens: u64,
     completion_tokens: u64,
     cache_hit: u64,
     cache_miss: u64,
@@ -44,11 +48,37 @@ struct UsageAcc {
 
 impl UsageAcc {
     fn to_json(&self) -> Value {
+        let effective_prompt = if self.last_prompt_tokens > 0 {
+            self.last_prompt_tokens
+        } else {
+            self.cumulative_prompt_tokens
+        };
+        let context_tokens = if self.last_prompt_tokens > 0 {
+            self.last_prompt_tokens + self.last_completion_tokens
+        } else {
+            effective_prompt + self.completion_tokens
+        };
+        let effective_hit = if self.last_prompt_tokens > 0 {
+            self.last_cache_hit
+        } else {
+            self.cache_hit
+        };
+        let effective_miss = if self.last_prompt_tokens > 0 {
+            self.last_cache_miss
+        } else {
+            self.cache_miss
+        };
         let mut obj = json!({
-            "prompt_tokens": self.prompt_tokens,
+            "prompt_tokens": effective_prompt,
             "completion_tokens": self.completion_tokens,
-            "prompt_cache_hit_tokens": self.cache_hit,
-            "prompt_cache_miss_tokens": self.cache_miss,
+            "total_tokens": effective_prompt + self.completion_tokens,
+            "context_tokens": context_tokens,
+            "cumulative_prompt_tokens": self.cumulative_prompt_tokens,
+            "cumulative_total_tokens": self.cumulative_prompt_tokens + self.completion_tokens,
+            "prompt_cache_hit_tokens": effective_hit,
+            "prompt_cache_miss_tokens": effective_miss,
+            "cumulative_cache_hit_tokens": self.cache_hit,
+            "cumulative_cache_miss_tokens": self.cache_miss,
             "completion_tokens_details": {
                 "reasoning_tokens": self.reasoning_tokens
             }
@@ -64,19 +94,31 @@ impl UsageAcc {
 }
 
 fn add_usage(total: &mut UsageAcc, u: &Value) {
-    total.prompt_tokens += u.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0);
-    total.completion_tokens += u
+    let p = u.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0);
+    let c = u
         .get("completion_tokens")
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    total.cache_hit += u
+    let hit = u
         .get("prompt_cache_hit_tokens")
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    total.cache_miss += u
+    let miss = u
         .get("prompt_cache_miss_tokens")
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    if p > 0 {
+        total.last_prompt_tokens = p;
+        total.last_completion_tokens = c;
+        total.last_cache_hit = hit;
+        total.last_cache_miss = miss;
+    } else if c > 0 && total.last_prompt_tokens == 0 {
+        total.last_completion_tokens += c;
+    }
+    total.cumulative_prompt_tokens += p;
+    total.completion_tokens += c;
+    total.cache_hit += hit;
+    total.cache_miss += miss;
     total.reasoning_tokens += u
         .pointer("/completion_tokens_details/reasoning_tokens")
         .and_then(Value::as_u64)

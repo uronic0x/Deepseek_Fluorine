@@ -117,6 +117,8 @@ import com.uronic0x.fluorine.protocol.WorkspaceFileArtifact
 import com.uronic0x.fluorine.ui.FluorineUiState
 import com.uronic0x.fluorine.ui.FluorineViewModel
 import com.uronic0x.fluorine.ui.components.AgentExecutionPanel
+import com.uronic0x.fluorine.ui.components.ClearAllSessionsConfirmDialog
+import com.uronic0x.fluorine.ui.components.DeleteSessionConfirmDialog
 import com.uronic0x.fluorine.ui.components.MessageItemCard
 import com.uronic0x.fluorine.ui.components.RenameSessionDialog
 import com.uronic0x.fluorine.ui.components.SessionDrawerContent
@@ -180,8 +182,8 @@ fun FluorineWorkbenchApp(
         }
     }
 
-    // Auto-scroll to latest message
-    LaunchedEffect(uiState.chatMessages.size, uiState.isBusy) {
+    // Auto-scroll to latest message when session changes or new messages arrive
+    LaunchedEffect(uiState.activeSessionId, uiState.chatMessages.size, uiState.isBusy) {
         if (uiState.chatMessages.isNotEmpty()) {
             listState.animateScrollToItem(uiState.chatMessages.lastIndex)
         }
@@ -415,7 +417,7 @@ fun FluorineWorkbenchApp(
                     viewModel.requestRenameSession(session)
                 },
                 onDeleteSession = { id ->
-                    viewModel.deleteSession(id)
+                    viewModel.requestDeleteSession(id)
                 },
                 onOpenWorkspaceFiles = {
                     dismissKeyboard()
@@ -569,7 +571,7 @@ fun FluorineWorkbenchApp(
                                 onRetryMessage = if (!uiState.isBusy) {
                                     { retryMsg ->
                                         dismissKeyboard()
-                                        viewModel.submitPrompt(retryMsg.text)
+                                        viewModel.retryMessage(retryMsg)
                                     }
                                 } else {
                                     null
@@ -620,7 +622,7 @@ fun FluorineWorkbenchApp(
                 exportAppLogsLauncher.launch("fluorine_app_$ts.log")
             },
             onClearAppLogs = viewModel::clearAppLogs,
-            onClearAllSessions = viewModel::clearAllSessions
+            onClearAllSessions = viewModel::requestClearAllSessions
         )
     }
 
@@ -653,6 +655,23 @@ fun FluorineWorkbenchApp(
             session = renaming,
             onDismiss = { viewModel.requestRenameSession(null) },
             onConfirm = { newTitle -> viewModel.renameSession(renaming.id, newTitle) }
+        )
+    }
+
+    val deleting = uiState.deletingSession
+    if (deleting != null) {
+        DeleteSessionConfirmDialog(
+            session = deleting,
+            onDismiss = viewModel::dismissDeleteSession,
+            onConfirm = viewModel::confirmDeleteSession
+        )
+    }
+
+    if (uiState.showClearAllSessionsConfirm) {
+        ClearAllSessionsConfirmDialog(
+            sessionCount = uiState.sessions.size,
+            onDismiss = viewModel::dismissClearAllSessions,
+            onConfirm = viewModel::confirmClearAllSessions
         )
     }
 }

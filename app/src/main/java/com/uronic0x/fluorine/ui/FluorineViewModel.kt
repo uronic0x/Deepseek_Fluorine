@@ -28,6 +28,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -106,6 +108,8 @@ data class FluorineUiState(
     val previewArtifact: WorkspaceFileArtifact? = null,
     val previewArtifactContent: String = "",
     val renamingSession: ConversationSession? = null,
+    val deletingSession: ConversationSession? = null,
+    val showClearAllSessionsConfirm: Boolean = false,
     val isDiscovering: Boolean = false,
     val discoverySummary: String = "",
     val engineInfo: String = "",
@@ -120,6 +124,7 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
     private val attachmentsDir = File(application.filesDir, "attachments").apply { mkdirs() }
     private val cameraCapturesDir = File(application.filesDir, "camera_captures").apply { mkdirs() }
     private val workspaceDir: File = FluorineBridge.initWorkspace(application)
+    private val persistMutex = Mutex()
 
     private val _uiState = MutableStateFlow(FluorineUiState())
     val uiState: StateFlow<FluorineUiState> = _uiState.asStateFlow()
@@ -187,15 +192,14 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
         val shellTimeoutSec = prefs.getInt("shell_timeout_sec", 20).coerceIn(5, 120)
 
         FluorineBridge.setAllowSdcardReadonly(savedSdcard)
-        val infoRaw = FluorineBridge.engineInfoJson()
-        val engineLabel = buildEngineLabel(infoRaw)
 
-        // 启动即进入一个「内存中的空白会话」，不读写磁盘历史——保证首屏秒开。
-        // 历史会话（以及工作区文件）随后在 IO 线程异步加载，加载完成后合并进列表。
+        // 先提供一个轻量占位的内存会话以保证首屏秒开；
+        // 随后在 IO 线程异步加载磁盘历史与引擎元信息：
+        // 若用户在几毫秒加载窗口内尚未输入/发送，直接恢复上次激活的历史会话（不再每次启动堆积新空白会话）。
         val startupMode = prefs.getString("mode", "chat") ?: "chat"
         val startupSession = ConversationSession(
             id = UUID.randomUUID().toString(),
-            title = if (startupMode == "work") "新 Work 任务" else "新对话",
+            title = CoreProtocol.defaultSessionTitleForMode(startupMode),
             mode = startupMode,
             createdAt = System.currentTimeMillis(),
             updatedAt = System.currentTimeMillis(),
@@ -204,6 +208,7 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
         )
         val effectiveModel = customModel.ifBlank { savedModel }
         val effectiveWeb = if (effectiveModel == "deepseek-v4-pro" && !unlockWebSearch) false else savedWeb
+        val initialEngineLabel = "Fluorine · ${if (FluorineBridge.isRustJniLoaded) "Rust JNI" else "Kotlin 回退"}"
 
         _uiState.update {
             it.copy(
@@ -245,24 +250,34 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
                 shellTimeoutSec = shellTimeoutSec,
                 workspacePath = workspaceDir.absolutePath,
                 workspaceFiles = emptyList(),
-                engineInfo = infoRaw,
-                engineLabel = engineLabel
+                engineInfo = "",
+                engineLabel = initialEngineLabel
             )
         }
-        // 异步加载历史会话与工作区文件，加载完成后合并（不覆盖当前空白会话）。
+
         viewModelScope.launch {
             val (loadedSessions, _) = withContext(Dispatchers.IO) { loadSessionsFromDisk() }
             val wsFiles = withContext(Dispatchers.IO) { CoreProtocol.listWorkspaceFiles(workspaceDir) }
+            val infoRaw = withContext(Dispatchers.IO) { FluorineBridge.engineInfoJson() }
+            val engineLabel = buildEngineLabel(infoRaw)
+
             _uiState.update { state ->
-                // 始终保留当前激活会话在列表首位（它可能是刚产生的对话），
-                // 再把磁盘历史中不重复的会话补充到后面。
+                // 启动始终进入空白新对话（当前内存会话）。历史会话在后台加载后补充到列表，
+                // 但过滤掉历史中的空白会话，避免反复启动堆积空白会话。
                 val current = state.sessions.firstOrNull { it.id == state.activeSessionId }
                 val merged = if (current != null) {
-                    listOf(current) + loadedSessions.filter { it.id != current.id }
+                    listOf(current) + loadedSessions.filter {
+                        it.id != current.id && !CoreProtocol.isUntouchedBlankSession(it)
+                    }
                 } else {
-                    loadedSessions
+                    loadedSessions.filterNot { CoreProtocol.isUntouchedBlankSession(it) }
                 }
-                state.copy(sessions = merged, workspaceFiles = wsFiles)
+                state.copy(
+                    sessions = merged,
+                    workspaceFiles = wsFiles,
+                    engineInfo = infoRaw,
+                    engineLabel = engineLabel
+                )
             }
             CoreProtocol.AppLogger.info(
                 "App",
@@ -320,36 +335,28 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
                 return list to migrated.id
             }
         }
-        val initial = ConversationSession(
-            id = UUID.randomUUID().toString(),
-            title = "新对话",
-            mode = "chat",
-            createdAt = System.currentTimeMillis(),
-            updatedAt = System.currentTimeMillis(),
-            chatMessages = emptyList(),
-            contextHistory = emptyList()
-        )
-        val list = listOf(initial)
-        persistSessionsToDisk(list, initial.id)
-        return list to initial.id
+        return emptyList<ConversationSession>() to ""
     }
 
     /**
-     * Atomic write using a temp file + rename so truncated/corrupted writes never destroy `sessions_store.json`.
+     * Serialized atomic write using a Mutex + temp file + rename so concurrent IO coroutines
+     * never race on `sessions_store.json.tmp` or corrupt `sessions_store.json`.
      */
     private fun persistSessionsToDisk(sessions: List<ConversationSession>, activeId: String) {
         viewModelScope.launch(Dispatchers.IO) {
-            val res = runCatching {
-                val json = CoreProtocol.serializeSessionsStore(sessions, activeId)
-                val tmp = File(sessionsStoreFile.parentFile, "sessions_store.json.tmp")
-                tmp.writeText(json, Charsets.UTF_8)
-                if (!tmp.renameTo(sessionsStoreFile)) {
-                    sessionsStoreFile.writeText(json, Charsets.UTF_8)
-                    tmp.delete()
+            persistMutex.withLock {
+                val res = runCatching {
+                    val json = CoreProtocol.serializeSessionsStore(sessions, activeId)
+                    val tmp = File(sessionsStoreFile.parentFile, "sessions_store.json.tmp")
+                    tmp.writeText(json, Charsets.UTF_8)
+                    if (!tmp.renameTo(sessionsStoreFile)) {
+                        sessionsStoreFile.writeText(json, Charsets.UTF_8)
+                        tmp.delete()
+                    }
                 }
-            }
-            res.onFailure { err ->
-                CoreProtocol.AppLogger.error("Storage", "Failed to save sessions_store.json: ${err.message}")
+                res.onFailure { err ->
+                    CoreProtocol.AppLogger.error("Storage", "Failed to save sessions_store.json: ${err.message}")
+                }
             }
         }
     }
@@ -413,15 +420,16 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
         }
         val current = _uiState.value
         val resolvedMode = if (targetMode == "chat" || targetMode == "work") targetMode else current.mode
+        val defaultTitle = CoreProtocol.defaultSessionTitleForMode(resolvedMode)
         val active = current.sessions.firstOrNull { it.id == current.activeSessionId }
         if (active != null && active.chatMessages.isEmpty()) {
             val updatedList = current.sessions.map {
-                if (it.id == active.id) it.copy(mode = resolvedMode, title = "新对话") else it
+                if (it.id == active.id) it.copy(mode = resolvedMode, title = defaultTitle) else it
             }
             _uiState.update {
                 it.copy(
                     sessions = updatedList,
-                    conversationTitle = "新对话",
+                    conversationTitle = defaultTitle,
                     mode = resolvedMode,
                     promptInput = "",
                     pendingAttachments = emptyList(),
@@ -429,20 +437,48 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
                     toolsText = ""
                 )
             }
+            prefs.edit().putString("mode", resolvedMode).apply()
             persistSessionsToDisk(updatedList, active.id)
+            return
+        }
+
+        // Reuse an existing untouched blank session for `resolvedMode` if one is already in memory
+        val existingBlank = current.sessions.firstOrNull {
+            it.mode == resolvedMode && CoreProtocol.isUntouchedBlankSession(it)
+        }
+        if (existingBlank != null) {
+            val reordered = listOf(existingBlank) + current.sessions.filterNot { it.id == existingBlank.id }
+            _uiState.update {
+                it.copy(
+                    sessions = reordered,
+                    activeSessionId = existingBlank.id,
+                    conversationTitle = existingBlank.title,
+                    mode = existingBlank.mode,
+                    chatMessages = emptyList(),
+                    contextHistory = emptyList(),
+                    promptInput = "",
+                    pendingAttachments = emptyList(),
+                    taskStatusText = "就绪",
+                    toolsText = ""
+                )
+            }
+            prefs.edit().putString("mode", resolvedMode).apply()
+            persistSessionsToDisk(reordered, existingBlank.id)
             return
         }
 
         val newSession = ConversationSession(
             id = UUID.randomUUID().toString(),
-            title = if (resolvedMode == "work") "新 Work 任务" else "新对话",
+            title = defaultTitle,
             mode = resolvedMode,
             createdAt = System.currentTimeMillis(),
             updatedAt = System.currentTimeMillis(),
             chatMessages = emptyList(),
             contextHistory = emptyList()
         )
-        val updatedSessions = listOf(newSession) + current.sessions
+        val updatedSessions = listOf(newSession) + current.sessions.filterNot {
+            CoreProtocol.isUntouchedBlankSession(it)
+        }
         _uiState.update {
             it.copy(
                 sessions = updatedSessions,
@@ -466,9 +502,15 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
             _uiState.update { it.copy(transientNotice = "当前会话正在生成，请先停止后再切换") }
             return
         }
-        val target = _uiState.value.sessions.firstOrNull { it.id == sessionId } ?: return
+        val current = _uiState.value
+        val target = current.sessions.firstOrNull { it.id == sessionId } ?: return
+        // Prune other untouched blank sessions when switching to a target session
+        val prunedSessions = current.sessions.filter {
+            it.id == target.id || !CoreProtocol.isUntouchedBlankSession(it)
+        }
         _uiState.update {
             it.copy(
+                sessions = prunedSessions,
                 activeSessionId = target.id,
                 conversationTitle = target.title,
                 mode = target.mode,
@@ -480,7 +522,7 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
             )
         }
         prefs.edit().putString("mode", target.mode).apply()
-        persistSessionsToDisk(_uiState.value.sessions, target.id)
+        persistSessionsToDisk(prunedSessions, target.id)
     }
 
     /**
@@ -504,7 +546,7 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
             updateSessionById(
                 targetSessionId = current.activeSessionId,
                 mode = newMode,
-                title = if (newMode == "work") "新 Work 任务" else "新对话",
+                title = CoreProtocol.defaultSessionTitleForMode(newMode),
                 touchUpdatedAt = false
             )
             return
@@ -532,8 +574,9 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun renameSession(sessionId: String, newTitle: String) {
-        val trimmed = newTitle.trim().ifEmpty { "新对话" }
         val s = _uiState.value
+        val targetMode = s.sessions.firstOrNull { it.id == sessionId }?.mode ?: s.mode
+        val trimmed = newTitle.trim().ifEmpty { CoreProtocol.defaultSessionTitleForMode(targetMode) }
         val updated = s.sessions.map {
             if (it.id == sessionId) it.copy(title = trimmed, updatedAt = System.currentTimeMillis()) else it
         }
@@ -548,14 +591,93 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
         persistSessionsToDisk(updated, s.activeSessionId)
     }
 
+    fun requestDeleteSession(sessionId: String) {
+        if (_uiState.value.isBusy) {
+            _uiState.update { it.copy(transientNotice = "当前会话正在生成，请先停止后再删除") }
+            return
+        }
+        val target = _uiState.value.sessions.firstOrNull { it.id == sessionId } ?: return
+        _uiState.update { it.copy(deletingSession = target) }
+    }
+
+    fun dismissDeleteSession() {
+        _uiState.update { it.copy(deletingSession = null) }
+    }
+
+    fun confirmDeleteSession() {
+        val target = _uiState.value.deletingSession ?: return
+        deleteSession(target.id)
+    }
+
+    fun requestClearAllSessions() {
+        if (_uiState.value.isBusy) {
+            _uiState.update { it.copy(transientNotice = "当前会话正在生成，请先停止后再清空") }
+            return
+        }
+        _uiState.update { it.copy(showClearAllSessionsConfirm = true) }
+    }
+
+    fun dismissClearAllSessions() {
+        _uiState.update { it.copy(showClearAllSessionsConfirm = false) }
+    }
+
+    fun confirmClearAllSessions() {
+        clearAllSessions()
+    }
+
+    private fun cleanupOrphanedAttachmentFiles(
+        deletedSessions: List<ConversationSession>,
+        remainingSessions: List<ConversationSession>
+    ) {
+        val candidatePaths = deletedSessions.asSequence()
+            .flatMap { s ->
+                s.chatMessages.asSequence().flatMap { it.attachments.asSequence() } +
+                    s.contextHistory.asSequence().flatMap { it.attachments.asSequence() }
+            }
+            .map { it.localPath }
+            .filter { it.isNotBlank() }
+            .toSet()
+        if (candidatePaths.isEmpty()) return
+
+        val retainedPaths = remainingSessions.asSequence()
+            .flatMap { s ->
+                s.chatMessages.asSequence().flatMap { it.attachments.asSequence() } +
+                    s.contextHistory.asSequence().flatMap { it.attachments.asSequence() }
+            }
+            .map { it.localPath }
+            .filter { it.isNotBlank() }
+            .toSet() + _uiState.value.pendingAttachments.map { it.localPath }.toSet()
+
+        val toDelete = candidatePaths - retainedPaths
+        if (toDelete.isEmpty()) return
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val attRoot = runCatching { attachmentsDir.canonicalFile.path }.getOrNull()
+            val camRoot = runCatching { cameraCapturesDir.canonicalFile.path }.getOrNull()
+            for (rawPath in toDelete) {
+                runCatching {
+                    val f = File(rawPath).canonicalFile
+                    val p = f.path
+                    val inManagedDir = (attRoot != null && p.startsWith(attRoot + File.separator)) ||
+                        (camRoot != null && p.startsWith(camRoot + File.separator))
+                    if (inManagedDir && f.isFile) {
+                        f.delete()
+                    }
+                }
+            }
+        }
+    }
+
     fun deleteSession(sessionId: String) {
         if (_uiState.value.isBusy) return
         val s = _uiState.value
+        val deleted = s.sessions.filter { it.id == sessionId }
         val remaining = s.sessions.filterNot { it.id == sessionId }
+        cleanupOrphanedAttachmentFiles(deleted, remaining)
         if (remaining.isEmpty()) {
             val fresh = ConversationSession(
                 id = UUID.randomUUID().toString(),
-                title = "新对话",
+                title = CoreProtocol.defaultSessionTitleForMode(s.mode),
                 mode = s.mode,
                 createdAt = System.currentTimeMillis(),
                 updatedAt = System.currentTimeMillis(),
@@ -571,6 +693,7 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
                     chatMessages = emptyList(),
                     contextHistory = emptyList(),
                     pendingAttachments = emptyList(),
+                    deletingSession = null,
                     taskStatusText = "就绪",
                     toolsText = ""
                 )
@@ -590,25 +713,30 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
                     mode = nextActive.mode,
                     chatMessages = nextActive.chatMessages,
                     contextHistory = nextActive.contextHistory,
-                    pendingAttachments = emptyList()
+                    pendingAttachments = emptyList(),
+                    deletingSession = null
                 )
             }
+            prefs.edit().putString("mode", nextActive.mode).apply()
             persistSessionsToDisk(remaining, nextActive.id)
         }
     }
 
     fun clearAllSessions() {
         if (_uiState.value.isBusy) return
+        val oldSessions = _uiState.value.sessions
+        val currentMode = _uiState.value.mode
         val fresh = ConversationSession(
             id = UUID.randomUUID().toString(),
-            title = "新对话",
-            mode = _uiState.value.mode,
+            title = CoreProtocol.defaultSessionTitleForMode(currentMode),
+            mode = currentMode,
             createdAt = System.currentTimeMillis(),
             updatedAt = System.currentTimeMillis(),
             chatMessages = emptyList(),
             contextHistory = emptyList()
         )
         val list = listOf(fresh)
+        cleanupOrphanedAttachmentFiles(oldSessions, emptyList())
         _uiState.update {
             it.copy(
                 sessions = list,
@@ -617,6 +745,8 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
                 chatMessages = emptyList(),
                 contextHistory = emptyList(),
                 pendingAttachments = emptyList(),
+                deletingSession = null,
+                showClearAllSessionsConfirm = false,
                 taskStatusText = "就绪",
                 toolsText = "",
                 transientNotice = "已清空全部历史会话"
@@ -1255,7 +1385,7 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
                             item.copy(id = newSessionId, chatMessages = dedupedMsgs)
                         }
 
-                        val merged = deduped + s.sessions
+                        val merged = deduped + s.sessions.filterNot { CoreProtocol.isUntouchedBlankSession(it) }
                         val active = merged.first()
                         _uiState.update {
                             it.copy(
@@ -1305,12 +1435,54 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    fun submitPrompt(overridePrompt: String? = null) {
+    fun retryMessage(message: ChatMessage) {
+        val current = _uiState.value
+        if (current.isBusy || message.role != "user") return
+        if (current.apiKey.isBlank()) {
+            _uiState.update {
+                it.copy(
+                    showSettingsDialog = true,
+                    transientNotice = "请先在连接设置中填写 DeepSeek API Key"
+                )
+            }
+            return
+        }
+        if (message.attachments.isNotEmpty() &&
+            !CoreProtocol.supportsMultimodal(current.model, current.discoveredCapabilities)
+        ) {
+            notifyMultimodalUnavailable()
+            return
+        }
+        val msgIndex = current.chatMessages.indexOfFirst { it.id == message.id }
+        if (msgIndex >= 0) {
+            val priorUserTurns = current.chatMessages.subList(0, msgIndex).count { it.role == "user" }
+            val trimmedMessages = current.chatMessages.subList(0, msgIndex)
+            var userTurnSeen = 0
+            val trimmedContext = current.contextHistory.takeWhile { turn ->
+                if (turn.role == "user") {
+                    userTurnSeen++
+                }
+                userTurnSeen <= priorUserTurns
+            }
+            updateSessionById(
+                targetSessionId = current.activeSessionId,
+                chatMessages = trimmedMessages,
+                contextHistory = trimmedContext,
+                persist = false
+            )
+        }
+        submitPrompt(overridePrompt = message.text, overrideAttachments = message.attachments)
+    }
+
+    fun submitPrompt(
+        overridePrompt: String? = null,
+        overrideAttachments: List<ChatAttachment>? = null
+    ) {
         val snapshot = _uiState.value
         if (snapshot.isBusy) return
 
         val rawPrompt = (overridePrompt ?: snapshot.promptInput).trim()
-        val attachmentsToUse = if (overridePrompt == null) snapshot.pendingAttachments else emptyList()
+        val attachmentsToUse = overrideAttachments ?: if (overridePrompt == null) snapshot.pendingAttachments else emptyList()
         if (rawPrompt.isEmpty() && attachmentsToUse.isEmpty()) return
 
         if (snapshot.apiKey.isBlank()) {
@@ -1509,19 +1681,29 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
 
                 // Drain one ordered event queue before final reconciliation. Per-event launches can
                 // otherwise race the final message and overwrite persisted results with stale deltas.
+                // High-frequency text/thinking deltas are coalesced at ~32ms intervals to prevent UI
+                // recomposition & full Markdown re-parsing storms while keeping streaming responsive.
                 val events = Channel<StreamUiEvent>(Channel.UNLIMITED)
                 val eventJob = launch {
-                    for (ev in events) {
+                    var dirtyDelta = false
+                    var lastPushNs = 0L
+                    val minPushIntervalNs = 32_000_000L // ~30 fps frame pacing for streaming deltas
+
+                    fun processSingleEvent(ev: StreamUiEvent) {
                         if (isWork) liveTimeline.accept(ev)
                         when (ev) {
-                            is StreamUiEvent.RoundStarted -> pushLiveMessageUpdate()
+                            is StreamUiEvent.RoundStarted -> {
+                                dirtyDelta = false
+                                lastPushNs = System.nanoTime()
+                                pushLiveMessageUpdate()
+                            }
                             is StreamUiEvent.ThinkingDelta -> {
                                 liveThinkingSb.append(ev.delta)
-                                pushLiveMessageUpdate()
+                                dirtyDelta = true
                             }
                             is StreamUiEvent.ContentDelta -> {
                                 liveContentSb.append(ev.delta)
-                                pushLiveMessageUpdate()
+                                dirtyDelta = true
                             }
                             is StreamUiEvent.Status -> {
                                 _uiState.update { it.copy(taskStatusText = ev.text) }
@@ -1529,13 +1711,36 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
                             is StreamUiEvent.ToolRecord -> {
                                 liveTools.add(ev.record)
                                 _uiState.update { it.copy(toolsText = formatToolCallsLog(liveTools)) }
+                                dirtyDelta = false
+                                lastPushNs = System.nanoTime()
                                 pushLiveMessageUpdate()
                             }
                             is StreamUiEvent.SourcesUpdated -> {
                                 liveSources = ev.sources
+                                dirtyDelta = false
+                                lastPushNs = System.nanoTime()
                                 pushLiveMessageUpdate()
                             }
                         }
+                    }
+
+                    for (ev in events) {
+                        processSingleEvent(ev)
+                        while (true) {
+                            val buffered = events.tryReceive().getOrNull() ?: break
+                            processSingleEvent(buffered)
+                        }
+                        if (dirtyDelta) {
+                            val nowNs = System.nanoTime()
+                            if (nowNs - lastPushNs >= minPushIntervalNs) {
+                                dirtyDelta = false
+                                lastPushNs = nowNs
+                                pushLiveMessageUpdate()
+                            }
+                        }
+                    }
+                    if (dirtyDelta) {
+                        pushLiveMessageUpdate()
                     }
                 }
                 val rawResp = try {
