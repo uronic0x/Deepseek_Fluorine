@@ -2,6 +2,10 @@
 
 export const DEFAULT_MAX_TOOL_ROUNDS = 50;
 export const MAX_TOOL_ROUNDS = 500;
+export const MAX_WEB_ATTACHMENTS = 5;
+export const MAX_WEB_IMAGE_RAW_BYTES = 1400 * 1024;
+export const MAX_WEB_DOC_RAW_BYTES = 1400 * 1024;
+export const MAX_WEB_CHAT_BODY_BYTES = Math.floor(1.85 * 1024 * 1024);
 
 export function normalizeToolRounds(value) {
   const n = Number(value);
@@ -54,6 +58,56 @@ export function buildUserContentBlocks(text, attachments = []) {
   return blocks.length ? blocks : cleanText;
 }
 
+export function validateBaseUrl(raw) {
+  const url = String(raw || '').trim().replace(/\/+$/, '');
+  if (!url) return { ok: false, error: 'Base URL 不能为空' };
+  if (url.length > 2048 || /[\u0000-\u0020\u007f?#@\\]/.test(url)) {
+    return { ok: false, error: 'Base URL 包含非法字符（不允许凭据、查询参数、片段或空白字符）' };
+  }
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return { ok: false, error: 'Base URL 格式不正确' };
+  }
+  if (parsed.username || parsed.password || parsed.search || parsed.hash || parsed.pathname.includes('..')) {
+    return { ok: false, error: 'Base URL 不允许包含凭据、查询参数、片段或 .. 路径' };
+  }
+  if (parsed.protocol === 'https:') {
+    if (!parsed.hostname) return { ok: false, error: 'Base URL 缺少主机名' };
+    return { ok: true, url };
+  }
+  if (parsed.protocol === 'http:') {
+    const portNum = Number(parsed.port);
+    if (
+      (parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost') &&
+      Number.isInteger(portNum) &&
+      portNum >= 1 &&
+      portNum <= 65535
+    ) {
+      return { ok: true, url };
+    }
+    return {
+      ok: false,
+      error: '明文 HTTP 仅允许本地回环地址 http://127.0.0.1:<port> 或 http://localhost:<port>',
+    };
+  }
+  return {
+    ok: false,
+    error: 'Base URL 仅支持 https:// 或本地 http://127.0.0.1:<port> / http://localhost:<port>',
+  };
+}
+
+export function estimateInlineRequestBytes({ attachments = [], prompt = '', history = [] } = {}) {
+  const inlineImages = (attachments || [])
+    .filter(a => a?.kind === 'image' && !a?.fileId && typeof a?.dataUrl === 'string')
+    .reduce((sum, a) => sum + a.dataUrl.length, 0);
+  const encoder = new TextEncoder();
+  const promptBytes = encoder.encode(String(prompt || '')).length;
+  const historyBytes = encoder.encode(JSON.stringify(history || [])).length;
+  return inlineImages + promptBytes + historyBytes + 2048;
+}
+
 export function safeUrl(raw) {
   try {
     const u = new URL(raw);
@@ -73,12 +127,12 @@ export function slugifyAppName(name = 'app') {
 }
 
 export function buildLatestReminder(date = new Date(), platform = 'Web') {
-  const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const days = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'];
   const y = date.getFullYear();
   const m = String(date.getMonth() + 1).padStart(2, '0');
   const d = String(date.getDate()).padStart(2, '0');
   const weekday = days[date.getDay()];
-  return `${y}-${m}-${d},${weekday},Local,${platform},Chinese`;
+  return `${y}-${m}-${d},${weekday},Local,${platform},中文`;
 }
 
 export function sanitizeHistoryMessage(

@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  MAX_WEB_CHAT_BODY_BYTES,
   accumulator,
   buildLatestReminder,
   buildUserContentBlocks,
   citationPoints,
   estimateCostUsd,
+  estimateInlineRequestBytes,
   formatServerToolEvent,
   normalizeToolRounds,
   safeUrl,
@@ -14,6 +16,7 @@ import {
   sourceList,
   supportsMultimodal,
   usageText,
+  validateBaseUrl,
 } from '../web/core.js';
 
 test('tool round settings accept the expanded range and bound invalid input', () => {
@@ -73,10 +76,28 @@ test('safeUrl blocks javascript and credential URLs', () => {
   assert.equal(safeUrl('https://user:pass@example.com'), null);
 });
 
-test('buildLatestReminder formats date, weekday, and platform', () => {
+test('buildLatestReminder formats date, Chinese weekday, platform, and language consistently with Android', () => {
   const d = new Date(2026, 10, 17, 10, 0, 0); // 2026-11-17 Tuesday
-  assert.equal(buildLatestReminder(d), '2026-11-17,Tuesday,Local,Web,Chinese');
-  assert.equal(buildLatestReminder(d, 'Android'), '2026-11-17,Tuesday,Local,Android,Chinese');
+  assert.equal(buildLatestReminder(d), '2026-11-17,星期二,Local,Web,中文');
+  assert.equal(buildLatestReminder(d, 'Android'), '2026-11-17,星期二,Local,Android,中文');
+});
+
+test('validateBaseUrl enforces HTTPS or loopback HTTP with port', () => {
+  assert.equal(validateBaseUrl('https://api.deepseek.com/').url, 'https://api.deepseek.com');
+  assert.equal(validateBaseUrl('http://127.0.0.1:8080/v1/').url, 'http://127.0.0.1:8080/v1');
+  assert.equal(validateBaseUrl('http://localhost:3000').ok, true);
+  assert.equal(validateBaseUrl('http://api.deepseek.com').ok, false);
+  assert.equal(validateBaseUrl('http://127.0.0.1.evil.com:8080').ok, false);
+  assert.equal(validateBaseUrl('https://user:pass@api.deepseek.com').ok, false);
+  assert.equal(validateBaseUrl('https://api.deepseek.com?x=1').ok, false);
+});
+
+test('estimateInlineRequestBytes detects cumulative multi-image budget overflow', () => {
+  const oneMbImage = { kind: 'image', dataUrl: 'data:image/jpeg;base64,' + 'A'.repeat(1_100_000) };
+  const single = estimateInlineRequestBytes({ attachments: [oneMbImage], prompt: 'hi', history: [] });
+  assert.ok(single < MAX_WEB_CHAT_BODY_BYTES);
+  const pair = estimateInlineRequestBytes({ attachments: [oneMbImage, oneMbImage], prompt: 'hi', history: [] });
+  assert.ok(pair > MAX_WEB_CHAT_BODY_BYTES);
 });
 
 test('slugifyAppName sanitizes app names for filenames', () => {

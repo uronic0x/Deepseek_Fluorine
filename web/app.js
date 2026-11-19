@@ -1,9 +1,14 @@
 import {
   DEFAULT_CHAT_SYSTEM_PROMPT,
   DEFAULT_WORK_SYSTEM_PROMPT,
+  MAX_WEB_ATTACHMENTS,
+  MAX_WEB_CHAT_BODY_BYTES,
+  MAX_WEB_DOC_RAW_BYTES,
+  MAX_WEB_IMAGE_RAW_BYTES,
   buildLatestReminder,
   buildUserContentBlocks,
   citationPoints,
+  estimateInlineRequestBytes,
   formatServerToolEvent,
   normalizeToolRounds,
   readCompletion,
@@ -12,6 +17,7 @@ import {
   sourceList,
   supportsMultimodal,
   usageText,
+  validateBaseUrl,
 } from './core.js';
 
 const $ = id => document.getElementById(id);
@@ -219,19 +225,34 @@ function readFileAsDataUrl(file) {
 }
 
 async function handleSelectedImages(files) {
+  const sess = currentSession();
   for (const f of files) {
-    if (f.size > 1500 * 1024) {
-      status(`${f.name} 超过 Web 端单次请求体积限制，请压缩后再试`);
+    if (pendingAttachments.length >= MAX_WEB_ATTACHMENTS) {
+      status(`单次最多添加 ${MAX_WEB_ATTACHMENTS} 个附件`);
+      break;
+    }
+    if (f.size > MAX_WEB_IMAGE_RAW_BYTES) {
+      status(`${f.name} 超过 Web 端单图体积限制（1.4 MiB），请压缩后再试`);
       continue;
     }
     const dataUrl = await readFileAsDataUrl(f);
-    pendingAttachments.push({
+    const candidate = {
       id: crypto.randomUUID(),
       kind: 'image',
       name: f.name,
       mimeType: f.type || 'image/jpeg',
       dataUrl,
+    };
+    const projectedBytes = estimateInlineRequestBytes({
+      attachments: [...pendingAttachments, candidate],
+      prompt: $('prompt').value,
+      history: sess.history,
     });
+    if (projectedBytes > MAX_WEB_CHAT_BODY_BYTES) {
+      status(`添加 ${f.name} 后请求体将超过 2 MiB 限制，请减少图片数量或先压缩`);
+      continue;
+    }
+    pendingAttachments.push(candidate);
   }
   renderAttachmentStrip();
 }
@@ -250,7 +271,11 @@ $('docInput').onchange = async e => {
   const file = e.target.files?.[0];
   e.target.value = '';
   if (!file) return;
-  if (file.size > 1400 * 1024) {
+  if (pendingAttachments.length >= MAX_WEB_ATTACHMENTS) {
+    status(`单次最多添加 ${MAX_WEB_ATTACHMENTS} 个附件`);
+    return;
+  }
+  if (file.size > MAX_WEB_DOC_RAW_BYTES) {
     status(`${file.name} 超过 1.4 MiB 限制`);
     return;
   }
@@ -515,7 +540,27 @@ $('composer').onsubmit = async e => {
     return;
   }
 
+  if (config.baseUrl) {
+    const checked = validateBaseUrl(config.baseUrl);
+    if (!checked.ok) {
+      $('settings').showModal();
+      status(`Base URL 无效：${checked.error}`);
+      return;
+    }
+    config.baseUrl = checked.url;
+  }
+
   const sess = currentSession();
+  const projectedBytes = estimateInlineRequestBytes({
+    attachments: pendingAttachments,
+    prompt,
+    history: sess.history,
+  });
+  if (projectedBytes > MAX_WEB_CHAT_BODY_BYTES) {
+    status('当前消息与内联图片总大小超过 2 MiB 请求上限，请减少图片数量或先新建会话。');
+    return;
+  }
+
   controller = new AbortController();
   lock(true);
 
@@ -523,15 +568,7 @@ $('composer').onsubmit = async e => {
   let attachmentsSnapshot = [...pendingAttachments];
   try {
     attachmentsSnapshot = await uploadPendingDocuments(config);
-    pendingAttachments = [];
-    renderAttachmentStrip();
-
-    $('prompt').value = '';
-    const userDisplay = attachmentsSnapshot.length
-      ? `${prompt}${prompt ? '\n' : ''}[附件 ${attachmentsSnapshot.length} 个]`
-      : prompt;
-    appendMessageBox('user', userDisplay);
-    sess.uiMessages.push({ role: 'user', text: userDisplay });
+    pendingAttachments = attachmentsSnapshot;
 
     const userContent = buildUserContentBlocks(prompt, attachmentsSnapshot);
     const keepRc = mode === 'work' || (config.web && config.model === 'deepseek-flash');
@@ -548,6 +585,33 @@ $('composer').onsubmit = async e => {
       { role: 'latest_reminder', content: buildLatestReminder(new Date(), currentPlatformLabel()) },
       { role: 'user', content: userContent },
     ];
+    const requestBodyStr = JSON.stringify({
+      stage: mode,
+      model: config.model,
+      base_url: config.baseUrl || undefined,
+      use_web: config.web,
+      use_thinking: config.thinking,
+      local_tools: mode === 'work',
+      tool_config: mode === 'work' ? config.toolConfig : undefined,
+      max_rounds: config.maxRounds,
+      system_prompt: config.systemPrompt || undefined,
+      effort: config.effort,
+      max_tokens: config.budget,
+      messages: pendingMsgs,
+    });
+    if (new TextEncoder().encode(requestBodyStr).length > MAX_WEB_CHAT_BODY_BYTES) {
+      renderAttachmentStrip();
+      throw new Error('请求体超过服务端 2 MiB 上限，请减少附件或新建会话后再试。');
+    }
+
+    pendingAttachments = [];
+    renderAttachmentStrip();
+    $('prompt').value = '';
+    const userDisplay = attachmentsSnapshot.length
+      ? `${prompt}${prompt ? '\n' : ''}[附件 ${attachmentsSnapshot.length} 个]`
+      : prompt;
+    appendMessageBox('user', userDisplay);
+    sess.uiMessages.push({ role: 'user', text: userDisplay });
 
     if (mode === 'work') {
       $('taskPanel').hidden = false;
@@ -569,20 +633,7 @@ $('composer').onsubmit = async e => {
           Authorization: `Bearer ${config.key}`,
         },
         signal: controller.signal,
-        body: JSON.stringify({
-          stage: mode,
-          model: config.model,
-          base_url: config.baseUrl || undefined,
-          use_web: config.web,
-          use_thinking: config.thinking,
-          local_tools: mode === 'work',
-          tool_config: mode === 'work' ? config.toolConfig : undefined,
-          max_rounds: config.maxRounds,
-          system_prompt: config.systemPrompt || undefined,
-          effort: config.effort,
-          max_tokens: config.budget,
-          messages: pendingMsgs,
-        }),
+        body: requestBodyStr,
       });
 
       const result = await readCompletion(
@@ -700,13 +751,22 @@ $('discover').onclick = async () => {
       $('modelInfo').textContent = lines.join('\n');
       return;
     }
+    const rawBaseUrl = $('baseUrl').value.trim();
+    let baseUrlPayload = {};
+    if (rawBaseUrl) {
+      const checked = validateBaseUrl(rawBaseUrl);
+      if (!checked.ok) {
+        throw new Error(`Base URL 无效：${checked.error}`);
+      }
+      baseUrlPayload = { base_url: checked.url };
+    }
     const r = await fetch('/api/models', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${key}`,
       },
-      body: '{}',
+      body: JSON.stringify(baseUrlPayload),
       signal: c.signal,
     });
     const v = await r.json();
