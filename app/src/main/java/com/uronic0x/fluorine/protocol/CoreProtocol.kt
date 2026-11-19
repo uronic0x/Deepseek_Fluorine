@@ -935,10 +935,10 @@ object CoreProtocol {
     }
 
     fun deserializeSessionsStoreChecked(rawJson: String): Result<Pair<List<ConversationSession>, String?>> {
-        if (rawJson.isBlank()) return Result.success(emptyList<ConversationSession>() to null)
         if (rawJson.toByteArray(Charsets.UTF_8).size > MAX_STORE_JSON_BYTES) {
             return Result.failure(IllegalArgumentException("会话数据超过 16 MiB 上限，已拒绝解析"))
         }
+        if (rawJson.isBlank()) return Result.success(emptyList<ConversationSession>() to null)
         return runCatching {
             val root = JSONObject(rawJson)
             val activeId = root.optString("active_session_id", "").takeIf { it.isNotBlank() }
