@@ -16,14 +16,18 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -140,7 +144,9 @@ fun SessionDrawerContent(
     }
 
     ModalDrawerSheet(
-        modifier = modifier.width(320.dp),
+        modifier = modifier
+            .fillMaxWidth(0.86f)
+            .widthIn(max = 320.dp),
         drawerContainerColor = MaterialTheme.colorScheme.surface,
         drawerContentColor = MaterialTheme.colorScheme.onSurface
     ) {
@@ -157,20 +163,27 @@ fun SessionDrawerContent(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = stringResource(R.string.app_name),
                             style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-                            color = MaterialTheme.colorScheme.onSurface
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                         Text(
                             text = "${stringResource(R.string.drawer_title)} · ${sessions.size}",
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
                         OutlinedButton(
                             onClick = { onNewSession("chat") },
                             shape = RoundedCornerShape(10.dp),
@@ -823,6 +836,7 @@ fun ClearAllSessionsConfirmDialog(
  * Allows non-root users to browse, preview, export (via SAF), share, or delete
  * any file inside `context.filesDir/workspace`.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun WorkspaceFilesDialog(
     files: List<WorkspaceFileArtifact>,
@@ -835,12 +849,18 @@ fun WorkspaceFilesDialog(
 ) {
     Dialog(
         onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false
+        )
     ) {
         Surface(
             modifier = Modifier
-                .fillMaxWidth(0.94f)
-                .heightIn(max = 640.dp),
+                .windowInsetsPadding(WindowInsets.safeDrawing)
+                .padding(12.dp)
+                .fillMaxWidth()
+                .widthIn(max = 680.dp)
+                .heightIn(max = 680.dp),
             shape = RoundedCornerShape(18.dp),
             color = MaterialTheme.colorScheme.surface,
             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
@@ -856,10 +876,12 @@ fun WorkspaceFilesDialog(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = stringResource(R.string.workspace_files_dialog_title),
-                            style = MaterialTheme.typography.titleLarge
+                            style = MaterialTheme.typography.titleLarge,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                         Text(
                             text = "支持将 fs_write / fs_edit 生成的工作区文件一键导出到手机任意目录或分享",
@@ -911,15 +933,14 @@ fun WorkspaceFilesDialog(
                                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
                                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
                             ) {
-                                Row(
+                                Column(
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .padding(12.dp),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
                                     Row(
-                                        modifier = Modifier.weight(1f),
+                                        modifier = Modifier.fillMaxWidth(),
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                                     ) {
@@ -937,14 +958,14 @@ fun WorkspaceFilesDialog(
                                                 )
                                             }
                                         }
-                                        Column {
+                                        Column(modifier = Modifier.weight(1f)) {
                                             Text(
                                                 text = artifact.relativePath,
                                                 style = MaterialTheme.typography.titleSmall.copy(
                                                     fontFamily = FontFamily.Monospace
                                                 ),
                                                 color = MaterialTheme.colorScheme.onSurface,
-                                                maxLines = 1,
+                                                maxLines = 2,
                                                 overflow = TextOverflow.Ellipsis
                                             )
                                             Text(
@@ -955,29 +976,42 @@ fun WorkspaceFilesDialog(
                                         }
                                     }
 
-                                    Row(
-                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                        verticalAlignment = Alignment.CenterVertically
+                                    FlowRow(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
                                     ) {
-                                        IconButton(
+                                        OutlinedButton(
                                             onClick = { onPreviewFile(artifact) },
-                                            modifier = Modifier.size(34.dp)
+                                            shape = RoundedCornerShape(8.dp),
+                                            contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                                                horizontal = 10.dp,
+                                                vertical = 6.dp
+                                            )
                                         ) {
                                             Icon(
                                                 imageVector = Icons.Outlined.Visibility,
-                                                contentDescription = "预览",
-                                                modifier = Modifier.size(18.dp)
+                                                contentDescription = null,
+                                                modifier = Modifier.size(15.dp)
                                             )
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text("预览", style = MaterialTheme.typography.labelSmall)
                                         }
-                                        IconButton(
+                                        OutlinedButton(
                                             onClick = { onShareFile(artifact) },
-                                            modifier = Modifier.size(34.dp)
+                                            shape = RoundedCornerShape(8.dp),
+                                            contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                                                horizontal = 10.dp,
+                                                vertical = 6.dp
+                                            )
                                         ) {
                                             Icon(
                                                 imageVector = Icons.Outlined.Share,
-                                                contentDescription = "分享",
-                                                modifier = Modifier.size(18.dp)
+                                                contentDescription = null,
+                                                modifier = Modifier.size(15.dp)
                                             )
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text("分享", style = MaterialTheme.typography.labelSmall)
                                         }
                                         Button(
                                             onClick = { onExportFile(artifact) },
@@ -998,16 +1032,19 @@ fun WorkspaceFilesDialog(
                                                 style = MaterialTheme.typography.labelSmall
                                             )
                                         }
-                                        IconButton(
+                                        TextButton(
                                             onClick = { onDeleteFile(artifact) },
-                                            modifier = Modifier.size(34.dp)
+                                            colors = ButtonDefaults.textButtonColors(
+                                                contentColor = MaterialTheme.colorScheme.error
+                                            )
                                         ) {
                                             Icon(
                                                 imageVector = Icons.Outlined.DeleteOutline,
-                                                contentDescription = "删除",
-                                                modifier = Modifier.size(18.dp),
-                                                tint = MaterialTheme.colorScheme.error
+                                                contentDescription = null,
+                                                modifier = Modifier.size(15.dp)
                                             )
+                                            Spacer(modifier = Modifier.width(2.dp))
+                                            Text("删除", style = MaterialTheme.typography.labelSmall)
                                         }
                                     }
                                 }
@@ -1020,6 +1057,7 @@ fun WorkspaceFilesDialog(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun WorkspaceFilePreviewDialog(
     artifact: WorkspaceFileArtifact,
@@ -1030,12 +1068,18 @@ fun WorkspaceFilePreviewDialog(
 ) {
     Dialog(
         onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false
+        )
     ) {
         Surface(
             modifier = Modifier
-                .fillMaxWidth(0.94f)
-                .heightIn(max = 680.dp),
+                .windowInsetsPadding(WindowInsets.safeDrawing)
+                .padding(12.dp)
+                .fillMaxWidth()
+                .widthIn(max = 680.dp)
+                .heightIn(max = 720.dp),
             shape = RoundedCornerShape(18.dp),
             color = MaterialTheme.colorScheme.surface,
             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
@@ -1044,7 +1088,7 @@ fun WorkspaceFilePreviewDialog(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(18.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -1054,42 +1098,51 @@ fun WorkspaceFilePreviewDialog(
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = artifact.fileName,
-                            style = MaterialTheme.typography.titleMedium.copy(fontFamily = FontFamily.Monospace)
+                            style = MaterialTheme.typography.titleMedium.copy(fontFamily = FontFamily.Monospace),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                         Text(
                             text = "${artifact.relativePath} · ${CoreProtocol.formatFileSize(artifact.bytes)}",
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        OutlinedButton(
-                            onClick = { onShare(artifact) },
-                            shape = RoundedCornerShape(8.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Outlined.Share,
-                                contentDescription = null,
-                                modifier = Modifier.size(15.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("分享", style = MaterialTheme.typography.labelMedium)
-                        }
-                        Button(
-                            onClick = { onExport(artifact) },
-                            shape = RoundedCornerShape(8.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Outlined.Download,
-                                contentDescription = null,
-                                modifier = Modifier.size(15.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("导出文件", style = MaterialTheme.typography.labelMedium)
-                        }
-                        IconButton(onClick = onDismiss) {
-                            Icon(Icons.Outlined.Close, contentDescription = "关闭")
-                        }
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Outlined.Close, contentDescription = "关闭")
+                    }
+                }
+
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = { onShare(artifact) },
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Share,
+                            contentDescription = null,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("分享", style = MaterialTheme.typography.labelMedium)
+                    }
+                    Button(
+                        onClick = { onExport(artifact) },
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Download,
+                            contentDescription = null,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("导出文件", style = MaterialTheme.typography.labelMedium)
                     }
                 }
 
@@ -1181,7 +1234,7 @@ fun SettingsDialog(
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(top = 24.dp, bottom = 12.dp)
+                    .windowInsetsPadding(WindowInsets.safeDrawing)
             ) {
                 // Header
                 Row(
@@ -1191,10 +1244,12 @@ fun SettingsDialog(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = stringResource(R.string.settings_title),
-                            style = MaterialTheme.typography.titleLarge
+                            style = MaterialTheme.typography.titleLarge,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                         Text(
                             text = uiState.engineLabel.ifBlank { "Fluorine" },
@@ -1232,54 +1287,61 @@ fun SettingsDialog(
                 }
 
                 // Tab Body
-                Column(
+                Box(
                     modifier = Modifier
                         .weight(1f)
-                        .fillMaxWidth()
-                        .verticalScroll(rememberScrollState())
-                        .padding(18.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                        .fillMaxWidth(),
+                    contentAlignment = Alignment.TopCenter
                 ) {
-                    when (selectedTab) {
-                        0 -> AppearanceSettingsTab(
-                            draft = draft,
-                            onDraftChange = { draft = it }
-                        )
-                        1 -> ConnectionSettingsTab(
-                            draft = draft,
-                            showApiKey = showApiKey,
-                            onToggleShowApiKey = { showApiKey = !showApiKey },
-                            isDiscovering = uiState.isDiscovering,
-                            discoverySummary = uiState.discoverySummary,
-                            onDiscover = { onDiscoverCapabilities(draft.apiKey, draft.baseUrl) },
-                            onDraftChange = { draft = it }
-                        )
-                        2 -> ModelInferenceSettingsTab(
-                            draft = draft,
-                            onDraftChange = { draft = it }
-                        )
-                        3 -> AgentPromptSettingsTab(
-                            draft = draft,
-                            onDraftChange = { draft = it }
-                        )
-                        4 -> WorkspaceSettingsTab(
-                            draft = draft,
-                            workspacePath = uiState.workspacePath,
-                            workspaceFileCount = uiState.workspaceFiles.size,
-                            onOpenWorkspaceFiles = onOpenWorkspaceFiles,
-                            onDraftChange = { draft = it }
-                        )
-                        5 -> DataAndLogsSettingsTab(
-                            sessionCount = uiState.sessions.size,
-                            showLogPreview = showLogPreview,
-                            onToggleLogPreview = { showLogPreview = !showLogPreview },
-                            onExportHistoryJson = onExportHistoryJson,
-                            onExportHistoryMarkdown = onExportHistoryMarkdown,
-                            onImportHistoryJson = onImportHistoryJson,
-                            onExportAppLogs = onExportAppLogs,
-                            onClearAppLogs = onClearAppLogs,
-                            onClearAllSessions = onClearAllSessions
-                        )
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .widthIn(max = 760.dp)
+                            .verticalScroll(rememberScrollState())
+                            .padding(18.dp),
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        when (selectedTab) {
+                            0 -> AppearanceSettingsTab(
+                                draft = draft,
+                                onDraftChange = { draft = it }
+                            )
+                            1 -> ConnectionSettingsTab(
+                                draft = draft,
+                                showApiKey = showApiKey,
+                                onToggleShowApiKey = { showApiKey = !showApiKey },
+                                isDiscovering = uiState.isDiscovering,
+                                discoverySummary = uiState.discoverySummary,
+                                onDiscover = { onDiscoverCapabilities(draft.apiKey, draft.baseUrl) },
+                                onDraftChange = { draft = it }
+                            )
+                            2 -> ModelInferenceSettingsTab(
+                                draft = draft,
+                                onDraftChange = { draft = it }
+                            )
+                            3 -> AgentPromptSettingsTab(
+                                draft = draft,
+                                onDraftChange = { draft = it }
+                            )
+                            4 -> WorkspaceSettingsTab(
+                                draft = draft,
+                                workspacePath = uiState.workspacePath,
+                                workspaceFileCount = uiState.workspaceFiles.size,
+                                onOpenWorkspaceFiles = onOpenWorkspaceFiles,
+                                onDraftChange = { draft = it }
+                            )
+                            5 -> DataAndLogsSettingsTab(
+                                sessionCount = uiState.sessions.size,
+                                showLogPreview = showLogPreview,
+                                onToggleLogPreview = { showLogPreview = !showLogPreview },
+                                onExportHistoryJson = onExportHistoryJson,
+                                onExportHistoryMarkdown = onExportHistoryMarkdown,
+                                onImportHistoryJson = onImportHistoryJson,
+                                onExportAppLogs = onExportAppLogs,
+                                onClearAppLogs = onClearAppLogs,
+                                onClearAllSessions = onClearAllSessions
+                            )
+                        }
                     }
                 }
 
@@ -1290,7 +1352,7 @@ fun SettingsDialog(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 18.dp, vertical = 12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
@@ -1300,7 +1362,10 @@ fun SettingsDialog(
                             MaterialTheme.colorScheme.tertiary
                         } else {
                             MaterialTheme.colorScheme.onSurfaceVariant
-                        }
+                        },
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         TextButton(onClick = onDismiss) {
@@ -1460,6 +1525,7 @@ private fun AppearanceSettingsTab(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ConnectionSettingsTab(
     draft: FluorineSettingsDraft,
@@ -1509,10 +1575,10 @@ private fun ConnectionSettingsTab(
             modifier = Modifier.fillMaxWidth()
         )
 
-        Row(
+        FlowRow(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             TextButton(
                 onClick = {
@@ -1854,8 +1920,8 @@ private fun WorkspaceSettingsTab(
         )
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         SettingsSwitchRow(
-            title = "工作区只读工具 (fs_list / fs_read / fs_search)",
-            subtitle = "浏览、读取和搜索工作区文件（及授权后的只读 /sdcard）",
+            title = "工作区只读工具 (device_probe / fs_list / fs_read / fs_search)",
+            subtitle = "探测设备环境，浏览、读取和搜索工作区文件（及授权后的只读 /sdcard）",
             checked = cfg.workspaceRead,
             onCheckedChange = { onDraftChange(draft.copy(workToolsConfig = cfg.copy(workspaceRead = it))) }
         )
@@ -1868,7 +1934,7 @@ private fun WorkspaceSettingsTab(
         )
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         SettingsSwitchRow(
-            title = "Git 仓库检查 (git_cmd)",
+            title = "Git 仓库检查 (git_inspect)",
             subtitle = "执行 status, diff, log, show, branch, rev-parse",
             checked = cfg.git,
             onCheckedChange = { onDraftChange(draft.copy(workToolsConfig = cfg.copy(git = it))) }
@@ -1882,47 +1948,46 @@ private fun WorkspaceSettingsTab(
         )
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         SettingsSwitchRow(
-            title = "设备控制与系统诊断 (termux_api / self_adb)",
+            title = "设备控制与系统诊断 (termux_device / android_ui)",
             subtitle = "开启后允许调用 termux-* 扩展或本地 Android dumpsys/pm/wm/am/input 诊断指令",
             checked = cfg.deviceControl,
             onCheckedChange = { onDraftChange(draft.copy(workToolsConfig = cfg.copy(deviceControl = it))) }
         )
 
-        Row(
+        FlowRow(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             Text(
-                text = "当前生效工具数：${cfg.enabledToolNames().size} / 18",
+                text = "当前生效工具数：${cfg.enabledToolNames().size} / ${com.uronic0x.fluorine.protocol.WorkToolsConfig.ALL_DESCRIPTORS.size}",
                 style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.primary
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(vertical = 10.dp)
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                TextButton(
-                    onClick = {
-                        onDraftChange(
-                            draft.copy(
-                                workToolsConfig = com.uronic0x.fluorine.protocol.WorkToolsConfig(
-                                    deterministic = true,
-                                    workspaceRead = true,
-                                    workspaceWrite = true,
-                                    git = true,
-                                    shellExec = true,
-                                    deviceControl = true,
-                                    disabledTools = emptySet()
-                                )
+            TextButton(
+                onClick = {
+                    onDraftChange(
+                        draft.copy(
+                            workToolsConfig = com.uronic0x.fluorine.protocol.WorkToolsConfig(
+                                deterministic = true,
+                                workspaceRead = true,
+                                workspaceWrite = true,
+                                git = true,
+                                shellExec = true,
+                                deviceControl = true,
+                                disabledTools = emptySet()
                             )
                         )
-                    }
-                ) {
-                    Text("全部开启")
+                    )
                 }
-                TextButton(
-                    onClick = { showFineGrainedTools = !showFineGrainedTools }
-                ) {
-                    Text(if (showFineGrainedTools) "收起单工具列表" else "逐个工具定制")
-                }
+            ) {
+                Text("全部开启")
+            }
+            TextButton(
+                onClick = { showFineGrainedTools = !showFineGrainedTools }
+            ) {
+                Text(if (showFineGrainedTools) "收起单工具列表" else "逐个工具定制")
             }
         }
 
@@ -1977,14 +2042,15 @@ private fun WorkspaceSettingsTab(
             style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
-        Row(
+        FlowRow(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Text(
                 text = "当前工作区共有 $workspaceFileCount 个文件",
-                style = MaterialTheme.typography.labelLarge
+                style = MaterialTheme.typography.labelLarge,
+                modifier = Modifier.padding(vertical = 8.dp)
             )
             Button(
                 onClick = onOpenWorkspaceFiles,
@@ -2023,6 +2089,7 @@ private fun WorkspaceSettingsTab(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun DataAndLogsSettingsTab(
     sessionCount: Int,
@@ -2041,15 +2108,14 @@ private fun DataAndLogsSettingsTab(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
-        Row(
+        FlowRow(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Button(
                 onClick = onExportHistoryJson,
-                modifier = Modifier
-                    .weight(1f)
-                    .testTag("export_history_json_button"),
+                modifier = Modifier.testTag("export_history_json_button"),
                 shape = RoundedCornerShape(10.dp)
             ) {
                 Icon(Icons.Outlined.Download, contentDescription = null, modifier = Modifier.size(16.dp))
@@ -2059,9 +2125,7 @@ private fun DataAndLogsSettingsTab(
 
             OutlinedButton(
                 onClick = onExportHistoryMarkdown,
-                modifier = Modifier
-                    .weight(1f)
-                    .testTag("export_history_md_button"),
+                modifier = Modifier.testTag("export_history_md_button"),
                 shape = RoundedCornerShape(10.dp)
             ) {
                 Icon(Icons.Outlined.Description, contentDescription = null, modifier = Modifier.size(16.dp))
@@ -2070,10 +2134,10 @@ private fun DataAndLogsSettingsTab(
             }
         }
 
-        Row(
+        FlowRow(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             OutlinedButton(
                 onClick = onImportHistoryJson,
@@ -2101,15 +2165,14 @@ private fun DataAndLogsSettingsTab(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
-        Row(
+        FlowRow(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Button(
                 onClick = onExportAppLogs,
-                modifier = Modifier
-                    .weight(1f)
-                    .testTag("export_app_logs_button"),
+                modifier = Modifier.testTag("export_app_logs_button"),
                 shape = RoundedCornerShape(10.dp)
             ) {
                 Icon(Icons.Outlined.Download, contentDescription = null, modifier = Modifier.size(16.dp))

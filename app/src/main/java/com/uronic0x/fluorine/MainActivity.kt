@@ -694,141 +694,154 @@ private fun TopHeaderBar(
             .background(MaterialTheme.colorScheme.background)
             .statusBarsPadding()
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 10.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                modifier = Modifier.weight(1f)
-            ) {
-                IconButton(
-                    onClick = onOpenDrawer,
-                    modifier = Modifier.testTag("open_drawer_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.Outlined.Menu,
-                        contentDescription = stringResource(R.string.drawer_title),
-                        tint = MaterialTheme.colorScheme.onBackground
-                    )
-                }
-
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable(onClick = onOpenSettings)
-                        .padding(horizontal = 4.dp, vertical = 2.dp)
-                        .testTag("header_model_button")
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Text(
-                            text = stringResource(R.string.app_name),
-                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                            color = MaterialTheme.colorScheme.onBackground
-                        )
-                        Box(
-                            modifier = Modifier
-                                .size(7.dp)
-                                .clip(CircleShape)
-                                .background(
-                                    if (isKeyReady) MaterialTheme.colorScheme.tertiary
-                                    else MaterialTheme.colorScheme.outline
-                                )
-                        )
-                    }
-                    Text(
-                        text = activeModel,
-                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
-                        color = MaterialTheme.colorScheme.primary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-            }
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+            val fontScale = LocalDensity.current.fontScale
+            val compactHeader = maxWidth < 360.dp || fontScale > 1.15f
 
             Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Surface(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable(onClick = onOpenWorkspaceFiles)
-                        .testTag("top_workspace_files_button"),
-                    shape = RoundedCornerShape(8.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.weight(1f)
                 ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    IconButton(
+                        onClick = onOpenDrawer,
+                        modifier = Modifier.testTag("open_drawer_button")
                     ) {
                         Icon(
-                            imageVector = Icons.Outlined.FolderOpen,
-                            contentDescription = "工作区文件",
-                            modifier = Modifier.size(15.dp),
-                            tint = MaterialTheme.colorScheme.primary
+                            imageVector = Icons.Outlined.Menu,
+                            contentDescription = stringResource(R.string.drawer_title),
+                            tint = MaterialTheme.colorScheme.onBackground
                         )
+                    }
+
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable(onClick = onOpenSettings)
+                            .padding(horizontal = 4.dp, vertical = 2.dp)
+                            .testTag("header_model_button")
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = stringResource(R.string.app_name),
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                color = MaterialTheme.colorScheme.onBackground,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .size(7.dp)
+                                    .clip(CircleShape)
+                                    .background(
+                                        if (isKeyReady) MaterialTheme.colorScheme.tertiary
+                                        else MaterialTheme.colorScheme.outline
+                                    )
+                            )
+                        }
                         Text(
-                            text = "$workspaceFileCount",
+                            text = activeModel,
                             style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
-                            color = MaterialTheme.colorScheme.onSurface
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
 
-                IconButton(
-                    onClick = onCycleTheme,
-                    modifier = Modifier
-                        .size(36.dp)
-                        .testTag("top_theme_toggle_button")
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    Icon(
-                        imageVector = if (themeMode == AppThemeMode.LIGHT) {
-                            Icons.Outlined.LightMode
-                        } else {
-                            Icons.Outlined.DarkMode
-                        },
-                        contentDescription = "切换暗色/白色主题",
-                        modifier = Modifier.size(18.dp),
-                        tint = MaterialTheme.colorScheme.onSurface
-                    )
-                }
+                    Surface(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable(onClick = onOpenWorkspaceFiles)
+                            .testTag("top_workspace_files_button"),
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 7.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.FolderOpen,
+                                contentDescription = "工作区文件",
+                                modifier = Modifier.size(16.dp),
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                text = "$workspaceFileCount",
+                                style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
 
-                Surface(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable(onClick = onNewChat)
-                        .testTag("new_chat_button"),
-                    shape = RoundedCornerShape(8.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    IconButton(
+                        onClick = onCycleTheme,
+                        modifier = Modifier
+                            .size(40.dp)
+                            .testTag("top_theme_toggle_button")
                     ) {
                         Icon(
-                            imageVector = Icons.Outlined.Add,
-                            contentDescription = null,
-                            modifier = Modifier.size(15.dp),
+                            imageVector = if (themeMode == AppThemeMode.LIGHT) {
+                                Icons.Outlined.LightMode
+                            } else {
+                                Icons.Outlined.DarkMode
+                            },
+                            contentDescription = "切换暗色/白色主题",
+                            modifier = Modifier.size(19.dp),
                             tint = MaterialTheme.colorScheme.onSurface
                         )
-                        Text(
-                            text = "新会话",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
+                    }
+
+                    Surface(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable(onClick = onNewChat)
+                            .testTag("new_chat_button"),
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(
+                                horizontal = if (compactHeader) 9.dp else 10.dp,
+                                vertical = 7.dp
+                            ),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.Add,
+                                contentDescription = "新会话",
+                                modifier = Modifier.size(16.dp),
+                                tint = MaterialTheme.colorScheme.onSurface
+                            )
+                            if (!compactHeader) {
+                                Text(
+                                    text = "新会话",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 1
+                                )
+                            }
+                        }
                     }
                 }
             }
