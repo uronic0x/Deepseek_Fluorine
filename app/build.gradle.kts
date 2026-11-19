@@ -96,40 +96,53 @@ android {
 
 val buildRustSo = tasks.register("buildRustSo") {
     group = "build"
-    description = "Builds libfluorine.so (arm64-v8a) via cargo-ndk when Rust toolchain is available on host."
+    description = "Builds libfluorine.so (arm64-v8a) via cargo-ndk (required; no Kotlin fallback)."
     doLast {
+        val skipRustBuild = (findProperty("skipRustBuild") as? String)?.equals("true", ignoreCase = true) == true
+        val jniLibOut = file("src/main/jniLibs/arm64-v8a/libfluorine.so")
+        if (skipRustBuild) {
+            logger.lifecycle("skipRustBuild=true: skipping cargo-ndk build (JVM unit-test mode).")
+            return@doLast
+        }
         val pathDirs = (System.getenv("PATH") ?: "").split(File.pathSeparator)
         val cargoBin = pathDirs
             .map { File(it, "cargo") }
             .firstOrNull { it.exists() && it.canExecute() }
             ?: File(System.getProperty("user.home"), ".cargo/bin/cargo").takeIf { it.exists() }
 
-        val jniLibOut = file("src/main/jniLibs/arm64-v8a/libfluorine.so")
-        if (cargoBin != null) {
-            logger.lifecycle("Building libfluorine.so for aarch64-linux-android using ${cargoBin.absolutePath}...")
-            val proc = ProcessBuilder(
-                cargoBin.absolutePath,
-                "ndk",
-                "-t",
-                "arm64-v8a",
-                "-o",
-                file("src/main/jniLibs").absolutePath,
-                "build",
-                "--release"
-            )
-                .directory(rootProject.projectDir)
-                .redirectErrorStream(true)
-                .start()
-            val out = proc.inputStream.bufferedReader().readText()
-            val code = proc.waitFor()
-            if (code == 0 && jniLibOut.exists()) {
-                logger.lifecycle("Successfully built ${jniLibOut.absolutePath} (${jniLibOut.length()} bytes)")
-            } else {
-                logger.warn("cargo ndk build skipped or exited with code $code:\n$out")
+        if (cargoBin == null) {
+            if (jniLibOut.exists() && jniLibOut.length() > 0L) {
+                logger.lifecycle("cargo not found in PATH; reusing prebuilt ${jniLibOut.absolutePath} (${jniLibOut.length()} bytes).")
+                return@doLast
             }
-        } else {
-            logger.lifecycle("cargo not found in PATH; skipping cargo-ndk step (runtime will use built-in native engine if libfluorine.so is absent).")
+            throw GradleException(
+                "libfluorine.so is missing and cargo was not found in PATH. " +
+                    "Install Rust + cargo-ndk + aarch64-linux-android target (or pass -PskipRustBuild=true for JVM-only unit tests)."
+            )
         }
+
+        logger.lifecycle("Building libfluorine.so for aarch64-linux-android using ${cargoBin.absolutePath}...")
+        val proc = ProcessBuilder(
+            cargoBin.absolutePath,
+            "ndk",
+            "-t",
+            "arm64-v8a",
+            "-o",
+            file("src/main/jniLibs").absolutePath,
+            "build",
+            "--release"
+        )
+            .directory(rootProject.projectDir)
+            .redirectErrorStream(true)
+            .start()
+        val out = proc.inputStream.bufferedReader().readText()
+        val code = proc.waitFor()
+        if (code != 0 || !jniLibOut.exists() || jniLibOut.length() == 0L) {
+            throw GradleException(
+                "cargo ndk build failed (exit=$code) and libfluorine.so was not generated.\n$out"
+            )
+        }
+        logger.lifecycle("Successfully built ${jniLibOut.absolutePath} (${jniLibOut.length()} bytes)")
     }
 }
 
