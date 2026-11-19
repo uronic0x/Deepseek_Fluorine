@@ -405,6 +405,11 @@ object FluorineBridge {
             return true
         }
 
+        // org.json `optString` 在字段存在但值为 JSON null 时会返回字面量 "null"，
+        // 上游 SSE 在推理阶段常发 `{"content": null}`，必须显式判空再取值。
+        fun JSONObject.strOrEmpty(key: String): String =
+            if (isNull(key)) "" else optString(key, "")
+
         val callback = object : JniStreamCallback {
             override fun onEvent(eventJson: String): Boolean {
                 if (cancelFlag.get()) return false
@@ -468,8 +473,8 @@ object FluorineBridge {
 
                     val delta = choice0.optJSONObject("delta")
                     if (delta != null) {
-                        val deltaReasoning = delta.optString("reasoning_content", "")
-                        val deltaContent = delta.optString("content", "")
+                        val deltaReasoning = delta.strOrEmpty("reasoning_content")
+                        val deltaContent = delta.strOrEmpty("content")
                         val deltaWorkSteps = delta.optJSONArray("work_steps")
                         val deltaTools = delta.optJSONArray("local_tool_calls")
                         val deltaSubturns = delta.optJSONArray("subturn_messages")

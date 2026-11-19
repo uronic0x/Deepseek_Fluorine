@@ -302,6 +302,50 @@ class FluorineProtocolAndToolsTest {
     }
 
     @Test
+    fun fluorineBridgeIgnoresNullContentDeltasInStreaming() {
+        val fakeBackend = object : StubNativeBackend(isLoaded = true) {
+            override fun streamChat(
+                requestId: Long,
+                apiKey: String,
+                requestJson: String,
+                workspacePath: String,
+                allowSdcardReadonly: Boolean,
+                callback: FluorineBridge.JniStreamCallback
+            ) {
+                // 上游 SSE 在推理阶段常发 content:null；org.json optString 会把它变成字面量 "null"
+                assertTrue(callback.onEvent("""{"choices":[{"delta":{"reasoning_content":null,"content":null}}]}"""))
+                assertTrue(callback.onEvent("""{"choices":[{"delta":{"content":null}}]}"""))
+                assertTrue(callback.onEvent("""{"choices":[{"delta":{"reasoning_content":"先分析"}}]}"""))
+                assertTrue(callback.onEvent("""{"choices":[{"delta":{"content":"最终回答"},"finish_reason":"stop"}]}"""))
+                assertTrue(callback.onEvent("[DONE]"))
+            }
+        }
+
+        try {
+            FluorineBridge.setBackendForTesting(fakeBackend)
+            val raw = FluorineBridge.chatCompleteStreamingJson(
+                requestId = 203L,
+                requestJson = JSONObject()
+                    .put("api_key", "sk-test")
+                    .put("base_url", "https://api.deepseek.com/")
+                    .put("model", "deepseek-flash")
+                    .put("stage", "chat")
+                    .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", "hi")))
+                    .toString(),
+                onEvent = {}
+            )
+            val parsed = CoreProtocol.parseEngineTurnResult(raw)
+            assertTrue(parsed.ok)
+            assertEquals("先分析", parsed.thinking)
+            assertEquals("最终回答", parsed.content)
+            assertFalse(parsed.content.contains("null"))
+            assertFalse(parsed.thinking.contains("null"))
+        } finally {
+            FluorineBridge.setBackendForTesting(null)
+        }
+    }
+
+    @Test
     fun fluorineBridgeUploadRejectsInvalidBaseUrlAndUninitializedManagedRoots() {
         val tempRoot = Files.createTempDirectory("fluorine_att_root").toFile()
         val sampleFile = File(tempRoot, "doc.pdf").apply { writeText("pdf") }
