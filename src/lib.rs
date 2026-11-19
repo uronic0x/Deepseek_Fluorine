@@ -176,15 +176,22 @@ fn read_upstream_error_body(
     upstream_error_msg(code).to_owned()
 }
 
-pub fn build_http_agent() -> ureq::Agent {
+pub fn build_http_agent_with_timeouts(connect_sec: u64, read_sec: u64) -> ureq::Agent {
+    let connect = connect_sec.clamp(5, 120);
+    let read = read_sec.clamp(30, 600);
+    let global = read.max(300);
     let config = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .max_redirects(0)
-        .timeout_global(Some(Duration::from_secs(300)))
-        .timeout_connect(Some(Duration::from_secs(20)))
-        .timeout_recv_response(Some(Duration::from_secs(60)))
+        .timeout_global(Some(Duration::from_secs(global)))
+        .timeout_connect(Some(Duration::from_secs(connect)))
+        .timeout_recv_response(Some(Duration::from_secs(read)))
         .build();
     config.into()
+}
+
+pub fn build_http_agent() -> ureq::Agent {
+    build_http_agent_with_timeouts(20, 60)
 }
 
 pub fn validate_api_key(raw_key: &str) -> Result<String, &'static str> {
@@ -204,21 +211,37 @@ pub fn get_meta_json_str(cfg: &AppConfig) -> String {
     config::meta_json(cfg, runtime).to_string()
 }
 
-/// Direct in-process model discovery against `{base}/models`.
-pub fn fetch_models_json_str(base: &str, api_key: &str) -> String {
+/// Direct in-process model discovery against `{base}/models` with explicit timeouts.
+pub fn fetch_models_json_str_with_timeouts(
+    base: &str,
+    api_key: &str,
+    connect_sec: u64,
+    read_sec: u64,
+) -> String {
+    let validated_base = match policy::validate_base_url(base) {
+        Ok(v) => v,
+        Err(msg) => {
+            return json!({ "ok": false, "error": { "code": "invalid_base_url", "message": msg } })
+                .to_string()
+        }
+    };
     let authorization = match validate_api_key(api_key) {
         Ok(v) => v,
-        Err(msg) => return json!({ "error": { "code": "key_required", "message": msg } }).to_string(),
+        Err(msg) => {
+            return json!({ "ok": false, "error": { "code": "key_required", "message": msg } })
+                .to_string()
+        }
     };
-    let agent = build_http_agent();
+    let agent = build_http_agent_with_timeouts(connect_sec, read_sec);
     let mut upstream = match agent
-        .get(&format!("{base}/models"))
+        .get(&format!("{validated_base}/models"))
         .header("Authorization", &authorization)
         .call()
     {
         Ok(v) => v,
         Err(_) => {
             return json!({
+                "ok": false,
                 "error": {
                     "code": "transport",
                     "message": "连接上游失败或超时；本轮未自动重试"
@@ -231,6 +254,7 @@ pub fn fetch_models_json_str(base: &str, api_key: &str) -> String {
     if !(200..300).contains(&code) {
         let detail = read_upstream_error_body(&mut upstream, code);
         return json!({
+            "ok": false,
             "error": {
                 "code": "upstream_error",
                 "message": detail
@@ -248,6 +272,7 @@ pub fn fetch_models_json_str(base: &str, api_key: &str) -> String {
         || bytes.len() > MAX_BODY
     {
         return json!({
+            "ok": false,
             "error": {
                 "code": "models_failed",
                 "message": "读取模型列表失败"
@@ -255,7 +280,196 @@ pub fn fetch_models_json_str(base: &str, api_key: &str) -> String {
         })
         .to_string();
     }
-    String::from_utf8_lossy(&bytes).into_owned()
+    let parsed: Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(_) => {
+            return json!({
+                "ok": false,
+                "error": {
+                    "code": "models_failed",
+                    "message": "上游模型列表 JSON 格式错误"
+                }
+            })
+            .to_string()
+        }
+    };
+    let data_arr = parsed
+        .get("data")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut model_ids = Vec::new();
+    let mut models_detail = Vec::new();
+    for item in &data_arr {
+        if let Some(id) = item
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            model_ids.push(Value::String(id.to_owned()));
+            models_detail.push(item.clone());
+        }
+    }
+    let local_tools: Vec<Value> = tools::tool_definitions(true)
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
+                .map(|n| Value::String(n.to_owned()))
+                .collect()
+        })
+        .unwrap_or_default();
+    json!({
+        "ok": true,
+        "base_url": validated_base,
+        "models": model_ids,
+        "models_detail": models_detail,
+        "data": data_arr,
+        "local_tools": local_tools
+    })
+    .to_string()
+}
+
+/// Direct in-process model discovery against `{base}/models`.
+pub fn fetch_models_json_str(base: &str, api_key: &str) -> String {
+    fetch_models_json_str_with_timeouts(base, api_key, 20, 60)
+}
+
+fn is_path_within_allowed_roots(file_path: &str, allowed_roots_raw: &str) -> Result<PathBuf, String> {
+    let raw = file_path.trim();
+    if raw.is_empty() {
+        return Err("附件本地路径为空".to_owned());
+    }
+    let canonical_file =
+        std::fs::canonicalize(raw).map_err(|_| "附件本地文件不存在或无法访问".to_owned())?;
+    let meta = std::fs::metadata(&canonical_file)
+        .map_err(|_| "无法读取附件文件属性".to_owned())?;
+    if !meta.is_file() {
+        return Err("附件路径不是有效文件".to_owned());
+    }
+    let roots: Vec<PathBuf> = allowed_roots_raw
+        .split('\n')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|r| std::fs::canonicalize(r).ok())
+        .collect();
+    if roots.is_empty() {
+        return Err("未配置受信任的附件目录".to_owned());
+    }
+    if roots.iter().any(|root| canonical_file.starts_with(root)) {
+        Ok(canonical_file)
+    } else {
+        Err("拒绝读取应用受管附件目录之外的文件".to_owned())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn upload_file_from_path_json_str(
+    api_key: &str,
+    base_url: &str,
+    file_path: &str,
+    filename: &str,
+    mime_type: &str,
+    purpose: &str,
+    allowed_roots_newline: &str,
+    connect_sec: u64,
+    read_sec: u64,
+) -> String {
+    let effective_base = if base_url.trim().is_empty() {
+        "https://api.deepseek.com".to_owned()
+    } else {
+        match policy::validate_base_url(base_url) {
+            Ok(v) => v,
+            Err(msg) => return json!({ "ok": false, "error": msg }).to_string(),
+        }
+    };
+    let authorization = match validate_api_key(api_key) {
+        Ok(v) => v,
+        Err(msg) => return json!({ "ok": false, "error": msg }).to_string(),
+    };
+    let canonical_file = match is_path_within_allowed_roots(file_path, allowed_roots_newline) {
+        Ok(p) => p,
+        Err(msg) => return json!({ "ok": false, "error": msg }).to_string(),
+    };
+    let file_len = match std::fs::metadata(&canonical_file) {
+        Ok(m) => m.len(),
+        Err(_) => return json!({ "ok": false, "error": "无法获取附件大小" }).to_string(),
+    };
+    let max_bytes: u64 = if purpose.trim() == "text_recognition"
+        || purpose.trim() == "rich_layout_recognition"
+    {
+        100 * 1024 * 1024
+    } else if mime_type.trim().starts_with("image/") {
+        64 * 1024 * 1024
+    } else {
+        32 * 1024 * 1024
+    };
+    if file_len == 0 {
+        return json!({ "ok": false, "error": "附件文件内容为空" }).to_string();
+    }
+    if file_len > max_bytes {
+        return json!({ "ok": false, "error": "附件体积超过官方上传上限" }).to_string();
+    }
+    let file_bytes = match std::fs::read(&canonical_file) {
+        Ok(b) => b,
+        Err(e) => {
+            return json!({ "ok": false, "error": format!("读取本地附件失败: {e}") }).to_string()
+        }
+    };
+    let boundary = "----FluorineMultipartBoundary7e2a9c4b";
+    let multipart = build_file_multipart_body(boundary, purpose, filename, mime_type, &file_bytes);
+    let agent = build_http_agent_with_timeouts(connect_sec, read_sec.max(150));
+    let mut upstream = match agent
+        .post(&format!("{effective_base}/files"))
+        .header("Authorization", &authorization)
+        .header(
+            "Content-Type",
+            &format!("multipart/form-data; boundary={boundary}"),
+        )
+        .send(multipart)
+    {
+        Ok(v) => v,
+        Err(_) => {
+            return json!({ "ok": false, "error": "上传文件到上游失败或超时" }).to_string()
+        }
+    };
+    let code = upstream.status().as_u16();
+    if !(200..300).contains(&code) {
+        let detail = read_upstream_error_body(&mut upstream, code);
+        return json!({ "ok": false, "error": detail }).to_string();
+    }
+    let mut resp_bytes = Vec::new();
+    if upstream
+        .body_mut()
+        .as_reader()
+        .take(MAX_BODY as u64 + 1)
+        .read_to_end(&mut resp_bytes)
+        .is_err()
+        || resp_bytes.len() > MAX_BODY
+    {
+        return json!({ "ok": false, "error": "读取文件上传响应失败或响应过大" }).to_string();
+    }
+    let parsed: Value = match serde_json::from_slice(&resp_bytes) {
+        Ok(v) => v,
+        Err(_) => return json!({ "ok": false, "error": "上游文件响应 JSON 格式错误" }).to_string(),
+    };
+    let file_id = parsed
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if file_id.is_empty() {
+        return json!({ "ok": false, "error": "上游未返回有效 file_id" }).to_string();
+    }
+    json!({
+        "ok": true,
+        "id": file_id,
+        "filename": parsed.get("filename").and_then(Value::as_str).unwrap_or(filename),
+        "bytes": parsed.get("bytes").and_then(Value::as_u64).unwrap_or(file_len),
+        "purpose": parsed.get("purpose").and_then(Value::as_str).unwrap_or(purpose)
+    })
+    .to_string()
 }
 
 fn decode_base64(input: &str) -> Result<Vec<u8>, &'static str> {
@@ -534,6 +748,43 @@ fn execute_client_web_tool(
     json!({ "ok": false, "error": format!("unknown web tool: {name}") }).to_string()
 }
 
+fn read_bounded_sse_line<R: BufRead>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+    max_bytes: usize,
+) -> Result<Option<String>, &'static str> {
+    buf.clear();
+    loop {
+        let available = match reader.fill_buf() {
+            Ok(b) => b,
+            Err(_) => return Err("stream_read_error"),
+        };
+        if available.is_empty() {
+            if buf.is_empty() {
+                return Ok(None);
+            }
+            return Ok(Some(String::from_utf8_lossy(buf).into_owned()));
+        }
+        if let Some(pos) = available.iter().position(|&b| b == b'\n') {
+            if buf.len() + pos > max_bytes {
+                return Err("sse_line_too_large");
+            }
+            buf.extend_from_slice(&available[..pos]);
+            reader.consume(pos + 1);
+            if buf.last() == Some(&b'\r') {
+                buf.pop();
+            }
+            return Ok(Some(String::from_utf8_lossy(buf).into_owned()));
+        }
+        if buf.len() + available.len() > max_bytes {
+            return Err("sse_line_too_large");
+        }
+        buf.extend_from_slice(available);
+        let consumed = available.len();
+        reader.consume(consumed);
+    }
+}
+
 /// Execute a chat or multi-round local tool loop directly into an `EventSink` (no HTTP loopback required).
 pub fn execute_chat_stream(
     sink: &mut dyn EventSink,
@@ -572,7 +823,10 @@ pub fn execute_chat_stream(
     };
 
     let effective_base = built.base_url.as_deref().unwrap_or(base);
-    let agent = build_http_agent();
+    let agent = build_http_agent_with_timeouts(
+        built.connect_timeout_sec.unwrap_or(20),
+        built.read_timeout_sec.unwrap_or(180),
+    );
 
     if built.use_local_tools {
         run_local_tool_loop_sink(
@@ -634,28 +888,49 @@ pub fn execute_chat_stream(
         return;
     }
 
-    let reader = BufReader::new(upstream.into_body().into_reader());
+    let mut reader = BufReader::new(upstream.into_body().into_reader());
+    let mut line_buf = Vec::new();
     let mut data_lines: Vec<String> = Vec::new();
-    for line_res in reader.lines() {
+    let mut frame_bytes = 0usize;
+    loop {
         if cancelled.load(Ordering::SeqCst) {
-            break;
+            let _ = sink.send_event(
+                &json!({"error": {"code": "cancelled", "message": "用户已手动停止生成"}}).to_string(),
+            );
+            return;
         }
-        let line = match line_res {
-            Ok(l) => l,
+        let line = match read_bounded_sse_line(&mut reader, &mut line_buf, MAX_BODY) {
+            Ok(Some(l)) => l,
+            Ok(None) => break,
+            Err("sse_line_too_large") => {
+                let _ = sink.send_event(
+                    &json!({"error": {"code": "size_limit", "message": "单个 SSE 事件超过 2 MiB 上限，已中止接收"}})
+                        .to_string(),
+                );
+                return;
+            }
             Err(_) => break,
         };
-        let trimmed = line.trim_end_matches('\r');
-        if trimmed.is_empty() {
+        if line.is_empty() {
             if !data_lines.is_empty() {
                 let payload = data_lines.join("\n");
                 data_lines.clear();
+                frame_bytes = 0;
                 let is_done = payload.trim() == "[DONE]";
                 if !sink.send_event(&payload) || is_done {
                     return;
                 }
             }
-        } else if let Some(rest) = trimmed.strip_prefix("data:") {
+        } else if let Some(rest) = line.strip_prefix("data:") {
             let clean = rest.strip_prefix(' ').unwrap_or(rest);
+            frame_bytes = frame_bytes.saturating_add(clean.len() + 1);
+            if frame_bytes > MAX_BODY {
+                let _ = sink.send_event(
+                    &json!({"error": {"code": "size_limit", "message": "单个 SSE 事件超过 2 MiB 上限，已中止接收"}})
+                        .to_string(),
+                );
+                return;
+            }
             data_lines.push(clean.to_owned());
         }
     }
@@ -683,6 +958,7 @@ fn run_local_tool_loop_sink(
     let mut tool_log: Vec<Value> = Vec::new();
     let mut work_steps: Vec<Value> = Vec::new();
     let mut collected_sources: Vec<Value> = Vec::new();
+    let mut subturn_messages: Vec<Value> = Vec::new();
 
     // Count tool batches, then reserve a response with tools disabled for the summary.
     for round in 0..=max_rounds {
@@ -690,6 +966,8 @@ fn run_local_tool_loop_sink(
             let _ = sink.send_event(
                 &json!({
                     "error": {"code": "cancelled", "message": "用户已手动停止生成"},
+                    "work_steps": work_steps,
+                    "subturn_messages": subturn_messages,
                     "usage": usage_acc.to_json()
                 })
                 .to_string(),
@@ -852,14 +1130,17 @@ fn run_local_tool_loop_sink(
                 }
             }
             if let Some(arr) = payload.get_mut("messages").and_then(Value::as_array_mut) {
-                arr.push(assistant_msg);
+                arr.push(assistant_msg.clone());
             }
+            subturn_messages.push(assistant_msg);
 
             for tc in &tool_calls {
                 if cancelled.load(Ordering::SeqCst) {
                     let _ = sink.send_event(
                         &json!({
                             "error": {"code": "cancelled", "message": "用户已手动停止生成"},
+                            "work_steps": work_steps,
+                            "subturn_messages": subturn_messages,
                             "usage": usage_acc.to_json()
                         })
                         .to_string(),
@@ -940,13 +1221,15 @@ fn run_local_tool_loop_sink(
                     return;
                 }
 
+                let tool_msg = json!({
+                    "role": "tool",
+                    "tool_call_id": tc_id,
+                    "content": result
+                });
                 if let Some(arr) = payload.get_mut("messages").and_then(Value::as_array_mut) {
-                    arr.push(json!({
-                        "role": "tool",
-                        "tool_call_id": tc_id,
-                        "content": result
-                    }));
+                    arr.push(tool_msg.clone());
                 }
+                subturn_messages.push(tool_msg);
             }
             continue;
         }
@@ -955,8 +1238,14 @@ fn run_local_tool_loop_sink(
         if !reasoning.is_empty() {
             delta["reasoning_content"] = json!(reasoning);
         }
+        if !work_steps.is_empty() {
+            delta["work_steps"] = json!(work_steps);
+        }
         if !tool_log.is_empty() {
             delta["local_tool_calls"] = json!(tool_log);
+        }
+        if !subturn_messages.is_empty() {
+            delta["subturn_messages"] = json!(subturn_messages);
         }
         if !collected_sources.is_empty() {
             delta["sources"] = json!(collected_sources);
@@ -1164,10 +1453,13 @@ pub fn serve(mut stream: TcpStream, port: u16, agent: ureq::Agent, base: &str, c
             Ok(b) => b,
             Err(e) => return reply_error(&mut stream, 400, "invalid_base64", e),
         };
-        let effective_base = policy::sanitize_base_url(
-            body_json.get("base_url").and_then(Value::as_str),
-        )
-        .unwrap_or_else(|| base.to_owned());
+        let effective_base = match body_json.get("base_url").and_then(Value::as_str).map(str::trim) {
+            Some(s) if !s.is_empty() => match policy::validate_base_url(s) {
+                Ok(v) => v,
+                Err(msg) => return reply_error(&mut stream, 400, "invalid_base_url", &msg),
+            },
+            _ => base.to_owned(),
+        };
         let boundary = "----FluorineMultipartBoundary7e2a9c4b";
         let multipart = build_file_multipart_body(boundary, purpose, filename, mime_type, &file_bytes);
         let mut upstream = match agent
@@ -1206,8 +1498,30 @@ pub fn serve(mut stream: TcpStream, port: u16, agent: ureq::Agent, base: &str, c
     }
 
     if req.path == "/api/models" {
+        let models_base = if req.body.is_empty() {
+            base.to_owned()
+        } else {
+            let body_json: Value = match serde_json::from_slice(&req.body) {
+                Ok(v) => v,
+                Err(e) => {
+                    return reply_error(
+                        &mut stream,
+                        400,
+                        "invalid_json",
+                        &format!("invalid JSON: {e}"),
+                    )
+                }
+            };
+            match body_json.get("base_url").and_then(Value::as_str).map(str::trim) {
+                Some(s) if !s.is_empty() => match policy::validate_base_url(s) {
+                    Ok(v) => v,
+                    Err(msg) => return reply_error(&mut stream, 400, "invalid_base_url", &msg),
+                },
+                _ => base.to_owned(),
+            }
+        };
         let mut upstream = match agent
-            .get(&format!("{base}/models"))
+            .get(&format!("{models_base}/models"))
             .header("Authorization", &authorization)
             .call()
         {
@@ -1363,14 +1677,126 @@ type JClass = *mut c_void;
 type JString = *mut c_void;
 type JMethodId = *mut c_void;
 
+#[repr(C)]
+#[allow(dead_code)]
+union JValue {
+    l: JObject,
+    j: i64,
+}
+
 // Standard JNI 1.1+ JNINativeInterface_ table indices:
+const JNI_EXCEPTION_OCCURRED: usize = 15;
+const JNI_EXCEPTION_CLEAR: usize = 17;
 const JNI_DELETE_LOCAL_REF: usize = 23;
 const JNI_GET_OBJECT_CLASS: usize = 31;
 const JNI_GET_METHOD_ID: usize = 33;
-const JNI_CALL_BOOLEAN_METHOD: usize = 37;
+const JNI_CALL_BOOLEAN_METHOD_A: usize = 39;
 const JNI_NEW_STRING_UTF: usize = 167;
 const JNI_GET_STRING_UTF_CHARS: usize = 169;
 const JNI_RELEASE_STRING_UTF_CHARS: usize = 170;
+
+/// Encodes standard UTF-8 into NUL-terminated Modified UTF-8 (CESU-8) expected by JNI `NewStringUTF`.
+/// Supplementary Unicode characters (U+10000..=U+10FFFF, e.g. emoji) are encoded as surrogate pairs
+/// so Android ART CheckJNI never aborts on 4-byte UTF-8 sequences.
+fn utf8_to_modified_utf8(text: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len() + 8);
+    for ch in text.chars() {
+        let cp = ch as u32;
+        if cp == 0 {
+            continue;
+        } else if cp <= 0x7F {
+            out.push(cp as u8);
+        } else if cp <= 0x7FF {
+            out.push((0xC0 | (cp >> 6)) as u8);
+            out.push((0x80 | (cp & 0x3F)) as u8);
+        } else if cp <= 0xFFFF {
+            out.push((0xE0 | (cp >> 12)) as u8);
+            out.push((0x80 | ((cp >> 6) & 0x3F)) as u8);
+            out.push((0x80 | (cp & 0x3F)) as u8);
+        } else {
+            let v = cp - 0x10000;
+            let hi = 0xD800 + (v >> 10);
+            let lo = 0xDC00 + (v & 0x3FF);
+            for unit in [hi, lo] {
+                out.push((0xE0 | (unit >> 12)) as u8);
+                out.push((0x80 | ((unit >> 6) & 0x3F)) as u8);
+                out.push((0x80 | (unit & 0x3F)) as u8);
+            }
+        }
+    }
+    out.push(0);
+    out
+}
+
+/// Decodes JNI Modified UTF-8 (CESU-8) bytes (without trailing NUL) back into standard UTF-8.
+fn modified_utf8_to_utf8(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b0 = bytes[i];
+        if b0 < 0x80 {
+            out.push(b0 as char);
+            i += 1;
+        } else if (b0 & 0xE0) == 0xC0 && i + 1 < bytes.len() {
+            let b1 = bytes[i + 1];
+            if b0 == 0xC0 && b1 == 0x80 {
+                out.push('\0');
+            } else {
+                let cp = (((b0 & 0x1F) as u32) << 6) | ((b1 & 0x3F) as u32);
+                out.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+            }
+            i += 2;
+        } else if (b0 & 0xF0) == 0xE0 && i + 2 < bytes.len() {
+            let b1 = bytes[i + 1];
+            let b2 = bytes[i + 2];
+            let unit1 =
+                (((b0 & 0x0F) as u32) << 12) | (((b1 & 0x3F) as u32) << 6) | ((b2 & 0x3F) as u32);
+            if (0xD800..=0xDBFF).contains(&unit1)
+                && i + 5 < bytes.len()
+                && (bytes[i + 3] & 0xF0) == 0xE0
+            {
+                let b3 = bytes[i + 3];
+                let b4 = bytes[i + 4];
+                let b5 = bytes[i + 5];
+                let unit2 = (((b3 & 0x0F) as u32) << 12)
+                    | (((b4 & 0x3F) as u32) << 6)
+                    | ((b5 & 0x3F) as u32);
+                if (0xDC00..=0xDFFF).contains(&unit2) {
+                    let cp = 0x10000 + (((unit1 - 0xD800) << 10) | (unit2 - 0xDC00));
+                    out.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+                    i += 6;
+                    continue;
+                }
+            }
+            out.push(char::from_u32(unit1).unwrap_or('\u{FFFD}'));
+            i += 3;
+        } else {
+            out.push('\u{FFFD}');
+            i += 1;
+        }
+    }
+    out
+}
+
+unsafe fn jni_clear_if_exception(env: JniEnv) -> bool {
+    if env.is_null() {
+        return false;
+    }
+    let table = *env;
+    let exc_occurred: unsafe extern "C" fn(JniEnv) -> JObject =
+        std::mem::transmute(*table.add(JNI_EXCEPTION_OCCURRED));
+    let exc = exc_occurred(env);
+    if !exc.is_null() {
+        let exc_clear: unsafe extern "C" fn(JniEnv) =
+            std::mem::transmute(*table.add(JNI_EXCEPTION_CLEAR));
+        let del_ref: unsafe extern "C" fn(JniEnv, JObject) =
+            std::mem::transmute(*table.add(JNI_DELETE_LOCAL_REF));
+        exc_clear(env);
+        del_ref(env, exc);
+        return true;
+    }
+    false
+}
 
 unsafe fn jni_get_string(env: JniEnv, jstr: JString) -> String {
     if env.is_null() || jstr.is_null() {
@@ -1383,9 +1809,10 @@ unsafe fn jni_get_string(env: JniEnv, jstr: JString) -> String {
         std::mem::transmute(*table.add(JNI_RELEASE_STRING_UTF_CHARS));
     let ptr = get_chars(env, jstr, std::ptr::null_mut());
     if ptr.is_null() {
+        let _ = jni_clear_if_exception(env);
         return String::new();
     }
-    let out = CStr::from_ptr(ptr).to_string_lossy().into_owned();
+    let out = modified_utf8_to_utf8(CStr::from_ptr(ptr).to_bytes());
     rel_chars(env, jstr, ptr);
     out
 }
@@ -1397,11 +1824,12 @@ unsafe fn jni_new_string(env: JniEnv, text: &str) -> JString {
     let table = *env;
     let new_str: unsafe extern "C" fn(JniEnv, *const c_char) -> JString =
         std::mem::transmute(*table.add(JNI_NEW_STRING_UTF));
-    let clean: String = text.chars().filter(|&c| c != '\0').collect();
-    match CString::new(clean) {
-        Ok(cstr) => new_str(env, cstr.as_ptr()),
-        Err(_) => std::ptr::null_mut(),
+    let encoded = utf8_to_modified_utf8(text);
+    let jstr = new_str(env, encoded.as_ptr() as *const c_char);
+    if jni_clear_if_exception(env) {
+        return std::ptr::null_mut();
     }
+    jstr
 }
 
 struct JniCallbackSink {
@@ -1417,16 +1845,21 @@ impl EventSink for JniCallbackSink {
                 return false;
             }
             let table = *self.env;
-            let call_bool: unsafe extern "C" fn(JniEnv, JObject, JMethodId, JString) -> u8 =
-                std::mem::transmute(*table.add(JNI_CALL_BOOLEAN_METHOD));
+            let call_bool_a: unsafe extern "C" fn(JniEnv, JObject, JMethodId, *const JValue) -> u8 =
+                std::mem::transmute(*table.add(JNI_CALL_BOOLEAN_METHOD_A));
             let del_ref: unsafe extern "C" fn(JniEnv, JObject) =
                 std::mem::transmute(*table.add(JNI_DELETE_LOCAL_REF));
             let jdata = jni_new_string(self.env, data);
             if jdata.is_null() {
                 return false;
             }
-            let keep_going = call_bool(self.env, self.callback_obj, self.method_id, jdata);
+            let args = [JValue { l: jdata }];
+            let keep_going =
+                call_bool_a(self.env, self.callback_obj, self.method_id, args.as_ptr());
             del_ref(self.env, jdata);
+            if jni_clear_if_exception(self.env) {
+                return false;
+            }
             keep_going != 0
         }
     }
@@ -1448,9 +1881,60 @@ unsafe fn jni_get_meta_impl(
     jni_new_string(env, &meta)
 }
 
-unsafe fn jni_fetch_models_impl(env: JniEnv, api_key_jstr: JString) -> JString {
+unsafe fn jni_fetch_models_impl(
+    env: JniEnv,
+    api_key_jstr: JString,
+    base_url_jstr: JString,
+    connect_timeout_sec: i32,
+    read_timeout_sec: i32,
+) -> JString {
     let api_key = jni_get_string(env, api_key_jstr);
-    let resp = fetch_models_json_str("https://api.deepseek.com", &api_key);
+    let raw_base = jni_get_string(env, base_url_jstr);
+    let base = if raw_base.trim().is_empty() {
+        "https://api.deepseek.com"
+    } else {
+        raw_base.trim()
+    };
+    let resp = fetch_models_json_str_with_timeouts(
+        base,
+        &api_key,
+        connect_timeout_sec.max(5) as u64,
+        read_timeout_sec.max(30) as u64,
+    );
+    jni_new_string(env, &resp)
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn jni_upload_file_impl(
+    env: JniEnv,
+    api_key_jstr: JString,
+    base_url_jstr: JString,
+    file_path_jstr: JString,
+    filename_jstr: JString,
+    mime_type_jstr: JString,
+    purpose_jstr: JString,
+    allowed_roots_jstr: JString,
+    connect_timeout_sec: i32,
+    read_timeout_sec: i32,
+) -> JString {
+    let api_key = jni_get_string(env, api_key_jstr);
+    let base_url = jni_get_string(env, base_url_jstr);
+    let file_path = jni_get_string(env, file_path_jstr);
+    let filename = jni_get_string(env, filename_jstr);
+    let mime_type = jni_get_string(env, mime_type_jstr);
+    let purpose = jni_get_string(env, purpose_jstr);
+    let allowed_roots = jni_get_string(env, allowed_roots_jstr);
+    let resp = upload_file_from_path_json_str(
+        &api_key,
+        &base_url,
+        &file_path,
+        &filename,
+        &mime_type,
+        &purpose,
+        &allowed_roots,
+        connect_timeout_sec.max(5) as u64,
+        read_timeout_sec.max(30) as u64,
+    );
     jni_new_string(env, &resp)
 }
 
@@ -1463,6 +1947,9 @@ unsafe fn jni_stream_chat_impl(
     allow_storage: u8,
     callback_obj: JObject,
 ) {
+    if env.is_null() || callback_obj.is_null() {
+        return;
+    }
     let api_key = jni_get_string(env, api_key_jstr);
     let request_json = jni_get_string(env, request_json_jstr);
     let workspace = jni_get_string(env, workspace_jstr);
@@ -1477,10 +1964,16 @@ unsafe fn jni_stream_chat_impl(
         std::mem::transmute(*table.add(JNI_DELETE_LOCAL_REF));
 
     let cls = get_cls(env, callback_obj);
+    if cls.is_null() || jni_clear_if_exception(env) {
+        return;
+    }
     let method_name = CString::new("onEvent").unwrap();
     let method_sig = CString::new("(Ljava/lang/String;)Z").unwrap();
     let method_id = get_mid(env, cls, method_name.as_ptr(), method_sig.as_ptr());
     del_ref(env, cls);
+    if method_id.is_null() || jni_clear_if_exception(env) {
+        return;
+    }
 
     let cancel_flag = Arc::new(AtomicBool::new(false));
     if let Ok(mut map) = cancel_registry().lock() {
@@ -1517,8 +2010,34 @@ fn jni_cancel_impl(request_id: i64) -> u8 {
     0
 }
 
+unsafe fn jni_execute_local_tool_impl(
+    env: JniEnv,
+    name_jstr: JString,
+    args_jstr: JString,
+    workspace_jstr: JString,
+    allow_storage: u8,
+) -> JString {
+    let name = jni_get_string(env, name_jstr);
+    let args = jni_get_string(env, args_jstr);
+    let workspace = jni_get_string(env, workspace_jstr);
+    let cfg = AppConfig::from_android(PathBuf::from(workspace), allow_storage != 0);
+    let out = tools::execute_tool(&name, &args, &cfg, true);
+    jni_new_string(env, &out)
+}
+
+unsafe fn jni_build_upstream_payload_impl(env: JniEnv, request_json_jstr: JString) -> JString {
+    let request_json = jni_get_string(env, request_json_jstr);
+    let out = match parse_input(request_json.as_bytes()).and_then(build_payload) {
+        Ok(built) => built.body.to_string(),
+        Err(msg) => json!({ "error": msg }).to_string(),
+    };
+    jni_new_string(env, &out)
+}
+
 // Export JNI symbols for `com.uronic0x.fluorine.bridge.FluorineBridge`
 
+/// # Safety
+/// Must be called by the JVM/ART JNI bridge with a valid `JNIEnv*` and Java `String` reference.
 #[no_mangle]
 pub unsafe extern "C" fn Java_com_uronic0x_fluorine_bridge_FluorineBridge_nativeGetMeta(
     env: JniEnv,
@@ -1529,15 +2048,60 @@ pub unsafe extern "C" fn Java_com_uronic0x_fluorine_bridge_FluorineBridge_native
     jni_get_meta_impl(env, workspace_jstr, allow_storage)
 }
 
+/// # Safety
+/// Must be called by the JVM/ART JNI bridge with a valid `JNIEnv*` and Java `String` references.
 #[no_mangle]
 pub unsafe extern "C" fn Java_com_uronic0x_fluorine_bridge_FluorineBridge_nativeFetchModels(
     env: JniEnv,
     _thiz: JObject,
     api_key_jstr: JString,
+    base_url_jstr: JString,
+    connect_timeout_sec: i32,
+    read_timeout_sec: i32,
 ) -> JString {
-    jni_fetch_models_impl(env, api_key_jstr)
+    jni_fetch_models_impl(
+        env,
+        api_key_jstr,
+        base_url_jstr,
+        connect_timeout_sec,
+        read_timeout_sec,
+    )
 }
 
+/// # Safety
+/// Must be called by the JVM/ART JNI bridge with a valid `JNIEnv*` and Java `String` references.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn Java_com_uronic0x_fluorine_bridge_FluorineBridge_nativeUploadFile(
+    env: JniEnv,
+    _thiz: JObject,
+    api_key_jstr: JString,
+    base_url_jstr: JString,
+    file_path_jstr: JString,
+    filename_jstr: JString,
+    mime_type_jstr: JString,
+    purpose_jstr: JString,
+    allowed_roots_jstr: JString,
+    connect_timeout_sec: i32,
+    read_timeout_sec: i32,
+) -> JString {
+    jni_upload_file_impl(
+        env,
+        api_key_jstr,
+        base_url_jstr,
+        file_path_jstr,
+        filename_jstr,
+        mime_type_jstr,
+        purpose_jstr,
+        allowed_roots_jstr,
+        connect_timeout_sec,
+        read_timeout_sec,
+    )
+}
+
+/// # Safety
+/// Must be called by the JVM/ART JNI bridge with a valid `JNIEnv*`, Java `String` references,
+/// and a callback implementing `FluorineBridge$JniStreamCallback`.
 #[no_mangle]
 pub unsafe extern "C" fn Java_com_uronic0x_fluorine_bridge_FluorineBridge_nativeStreamChat(
     env: JniEnv,
@@ -1560,6 +2124,8 @@ pub unsafe extern "C" fn Java_com_uronic0x_fluorine_bridge_FluorineBridge_native
     );
 }
 
+/// # Safety
+/// Must be called by the JVM/ART JNI bridge with a valid `JNIEnv*`.
 #[no_mangle]
 pub unsafe extern "C" fn Java_com_uronic0x_fluorine_bridge_FluorineBridge_nativeCancelStream(
     _env: JniEnv,
@@ -1567,6 +2133,31 @@ pub unsafe extern "C" fn Java_com_uronic0x_fluorine_bridge_FluorineBridge_native
     request_id: i64,
 ) -> u8 {
     jni_cancel_impl(request_id)
+}
+
+/// # Safety
+/// Must be called by the JVM/ART JNI bridge with a valid `JNIEnv*` and Java `String` references.
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_uronic0x_fluorine_bridge_FluorineBridge_nativeExecuteLocalTool(
+    env: JniEnv,
+    _thiz: JObject,
+    name_jstr: JString,
+    args_jstr: JString,
+    workspace_jstr: JString,
+    allow_storage: u8,
+) -> JString {
+    jni_execute_local_tool_impl(env, name_jstr, args_jstr, workspace_jstr, allow_storage)
+}
+
+/// # Safety
+/// Must be called by the JVM/ART JNI bridge with a valid `JNIEnv*` and Java `String` reference.
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_uronic0x_fluorine_bridge_FluorineBridge_nativeBuildUpstreamPayload(
+    env: JniEnv,
+    _thiz: JObject,
+    request_json_jstr: JString,
+) -> JString {
+    jni_build_upstream_payload_impl(env, request_json_jstr)
 }
 
 #[cfg(test)]
@@ -1622,5 +2213,46 @@ mod tests {
         assert!(p_idx < f_idx);
         assert!(s.contains("rich_layout_recognition"));
         assert!(s.contains("filename=\"report.pdf\""));
+    }
+
+    #[test]
+    fn modified_utf8_round_trips_supplementary_emoji_and_cjk() {
+        let sample = "你好 Fluorine 😀🚀 数学 ∑∫";
+        let encoded = utf8_to_modified_utf8(sample);
+        assert_eq!(*encoded.last().unwrap(), 0);
+        // 4-byte UTF-8 emoji must be split into 6-byte CESU-8 surrogate pairs (no 0xF0..0xF4 leading byte)
+        assert!(!encoded.iter().any(|&b| (0xF0..=0xF4).contains(&b)));
+        let decoded = modified_utf8_to_utf8(&encoded[..encoded.len() - 1]);
+        assert_eq!(decoded, sample);
+    }
+
+    #[test]
+    fn bounded_sse_line_reader_rejects_oversized_lines() {
+        let huge = format!("data: {}\n", "a".repeat(256));
+        let mut reader = BufReader::new(huge.as_bytes());
+        let mut buf = Vec::new();
+        assert_eq!(
+            read_bounded_sse_line(&mut reader, &mut buf, 128),
+            Err("sse_line_too_large")
+        );
+    }
+
+    #[test]
+    fn upload_path_check_blocks_files_outside_allowed_roots() {
+        let tmp = std::env::temp_dir().join("fluorine_upload_root_test");
+        let allowed = tmp.join("attachments");
+        let outside = tmp.join("shared_prefs");
+        let _ = std::fs::create_dir_all(&allowed);
+        let _ = std::fs::create_dir_all(&outside);
+        let ok_file = allowed.join("doc.txt");
+        let bad_file = outside.join("secret.xml");
+        std::fs::write(&ok_file, "ok").unwrap();
+        std::fs::write(&bad_file, "secret").unwrap();
+
+        let allowed_str = allowed.display().to_string();
+        assert!(is_path_within_allowed_roots(&ok_file.display().to_string(), &allowed_str).is_ok());
+        assert!(is_path_within_allowed_roots(&bad_file.display().to_string(), &allowed_str).is_err());
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

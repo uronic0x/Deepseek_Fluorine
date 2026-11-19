@@ -193,6 +193,9 @@ pub fn canonical_tool_name(name: &str) -> &str {
     match name {
         "calc_eval" => "calc",
         "stats_summary" => "stats",
+        "git_cmd" => "git_inspect",
+        "termux_api" => "termux_device",
+        "self_adb" => "android_ui",
         _ => name,
     }
 }
@@ -222,13 +225,14 @@ pub fn execute_tool(name: &str, args_json: &str, cfg: &AppConfig, allow_device_t
         Ok(v) => v,
         Err(e) => return json!({ "error": format!("invalid JSON arguments: {e}") }).to_string(),
     };
-    if harness::is_device_control_tool(name) && !allow_device_tools {
+    let canonical = canonical_tool_name(name);
+    if harness::is_device_control_tool(canonical) && !allow_device_tools {
         return json!({
             "error": format!("tool '{name}' requires device/shell control permission (enable device_tools)")
         })
         .to_string();
     }
-    let out = match canonical_tool_name(name) {
+    let out = match canonical {
         "calc" => run_calc(&args),
         "stats" => run_stats(&args),
         "unit_convert" => run_unit_convert(&args),
@@ -238,7 +242,7 @@ pub fn execute_tool(name: &str, args_json: &str, cfg: &AppConfig, allow_device_t
         "csv_summary" => run_csv_summary(&args),
         "text_diff" => run_text_diff(&args),
         "encode_hash" => run_encode_hash(&args),
-        _ => harness::execute_harness_tool(name, &args, cfg),
+        _ => harness::execute_harness_tool(canonical, &args, cfg),
     };
     match out {
         Ok(v) => v.to_string(),

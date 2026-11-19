@@ -45,6 +45,8 @@ pub struct ChatInput {
     pub max_rounds: usize,
     pub temperature: Option<f64>,
     pub base_url: Option<String>,
+    pub connect_timeout_sec: Option<u64>,
+    pub read_timeout_sec: Option<u64>,
     pub system_prompt: Option<String>,
     pub messages: Vec<Value>,
 }
@@ -58,6 +60,8 @@ pub struct BuiltPayload {
     pub allow_web: bool,
     pub max_rounds: usize,
     pub base_url: Option<String>,
+    pub connect_timeout_sec: Option<u64>,
+    pub read_timeout_sec: Option<u64>,
 }
 
 pub fn default_system_prompt(stage: &str, use_local_tools: bool) -> &'static str {
@@ -72,19 +76,103 @@ pub fn sanitize_max_tokens(v: Option<u64>) -> u64 {
     v.unwrap_or(16384).clamp(256, 393_216)
 }
 
-pub fn sanitize_base_url(raw: Option<&str>) -> Option<String> {
-    let url = raw?.trim().trim_end_matches('/');
+fn is_valid_host_label_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'-' || b == b'.'
+}
+
+fn validate_port(port_str: &str) -> bool {
+    !port_str.is_empty()
+        && port_str.bytes().all(|b| b.is_ascii_digit())
+        && port_str.parse::<u16>().is_ok_and(|p| p > 0)
+}
+
+pub fn validate_base_url(raw: &str) -> Result<String, String> {
+    let url = raw.trim().trim_end_matches('/');
     if url.is_empty() {
+        return Err("Base URL 不能为空".to_owned());
+    }
+    if url.len() > 2048
+        || url
+            .bytes()
+            .any(|b| b <= 0x20 || b == 0x7f || matches!(b, b'?' | b'#' | b'@' | b'\\'))
+    {
+        return Err("Base URL 包含非法字符（不允许凭据、查询参数、片段或空白字符）".to_owned());
+    }
+
+    let (is_https, rest) = if let Some(r) = url.strip_prefix("https://") {
+        (true, r)
+    } else if let Some(r) = url.strip_prefix("http://") {
+        (false, r)
+    } else {
+        return Err(
+            "Base URL 仅支持 https:// 或本地 http://127.0.0.1:<port> / http://localhost:<port>"
+                .to_owned(),
+        );
+    };
+
+    let (authority, path) = match rest.find('/') {
+        Some(idx) => (&rest[..idx], &rest[idx..]),
+        None => (rest, ""),
+    };
+    if authority.is_empty() || path.contains("..") {
+        return Err("Base URL 主机或路径格式不正确".to_owned());
+    }
+
+    if is_https {
+        let (host, port_opt) = if let Some(stripped) = authority.strip_prefix('[') {
+            let end = stripped
+                .find(']')
+                .ok_or_else(|| "Base URL IPv6 主机格式不正确".to_owned())?;
+            let ipv6 = &stripped[..end];
+            let rem = &stripped[end + 1..];
+            if ipv6.is_empty() || !ipv6.bytes().all(|b| b.is_ascii_hexdigit() || b == b':') {
+                return Err("Base URL IPv6 主机格式不正确".to_owned());
+            }
+            let port = if rem.is_empty() {
+                None
+            } else if let Some(p) = rem.strip_prefix(':') {
+                Some(p)
+            } else {
+                return Err("Base URL 端口格式不正确".to_owned());
+            };
+            (ipv6, port)
+        } else if let Some(colon) = authority.rfind(':') {
+            (&authority[..colon], Some(&authority[colon + 1..]))
+        } else {
+            (authority, None)
+        };
+
+        if host.is_empty()
+            || host.starts_with('.')
+            || host.ends_with('.')
+            || host.contains("..")
+            || (!authority.starts_with('[') && !host.bytes().all(is_valid_host_label_char))
+        {
+            return Err("Base URL 主机名格式不正确".to_owned());
+        }
+        if port_opt.is_some_and(|port| !validate_port(port)) {
+            return Err("Base URL 端口范围无效".to_owned());
+        }
+        return Ok(url.to_owned());
+    }
+
+    // Plain HTTP is strictly limited to explicit local loopback host + port.
+    if authority
+        .strip_prefix("127.0.0.1:")
+        .or_else(|| authority.strip_prefix("localhost:"))
+        .is_some_and(validate_port)
+    {
+        return Ok(url.to_owned());
+    }
+    Err("非加密 http:// 仅允许 http://127.0.0.1:<port> 或 http://localhost:<port>".to_owned())
+}
+
+pub fn sanitize_base_url(raw: Option<&str>) -> Option<String> {
+    let trimmed = raw?.trim();
+    if trimmed.is_empty() {
         return None;
     }
-    if url.starts_with("https://")
-        || url.starts_with("http://127.0.0.1:")
-        || url.starts_with("http://localhost:")
-    {
-        Some(url.to_owned())
-    } else {
-        None
-    }
+    validate_base_url(trimmed).ok()
 }
 
 fn resolve_enabled_tools(req: &Value, local_tools: bool, device_tools: bool) -> HashSet<String> {
@@ -243,7 +331,19 @@ pub fn parse_input(raw: &[u8]) -> Result<ChatInput, String> {
         None
     };
 
-    let base_url = sanitize_base_url(req.get("base_url").and_then(Value::as_str));
+    let base_url = match req.get("base_url").and_then(Value::as_str).map(str::trim) {
+        Some(s) if !s.is_empty() => Some(validate_base_url(s)?),
+        _ => None,
+    };
+
+    let connect_timeout_sec = req
+        .get("connect_timeout_sec")
+        .and_then(Value::as_u64)
+        .map(|v| v.clamp(5, 120));
+    let read_timeout_sec = req
+        .get("read_timeout_sec")
+        .and_then(Value::as_u64)
+        .map(|v| v.clamp(30, 600));
 
     let system_prompt = req
         .get("system_prompt")
@@ -274,6 +374,8 @@ pub fn parse_input(raw: &[u8]) -> Result<ChatInput, String> {
         max_rounds,
         temperature,
         base_url,
+        connect_timeout_sec,
+        read_timeout_sec,
         system_prompt,
         messages,
     })
@@ -484,6 +586,8 @@ pub fn build_payload(input: ChatInput) -> Result<BuiltPayload, String> {
         allow_web: input.allow_web,
         max_rounds: input.max_rounds,
         base_url: input.base_url,
+        connect_timeout_sec: input.connect_timeout_sec,
+        read_timeout_sec: input.read_timeout_sec,
     })
 }
 
@@ -577,5 +681,38 @@ mod tests {
         assert_eq!(msgs[2]["reasoning_content"], "should keep when tools present");
         assert_eq!(msgs[4]["reasoning_content"], "turn reasoning");
         assert_eq!(msgs[3]["role"], "tool");
+    }
+
+    #[test]
+    fn base_url_validation_rejects_plaintext_remote_and_malformed_urls() {
+        assert_eq!(
+            validate_base_url("https://api.deepseek.com/").unwrap(),
+            "https://api.deepseek.com"
+        );
+        assert_eq!(
+            validate_base_url("https://proxy.example.com:8443/v1/").unwrap(),
+            "https://proxy.example.com:8443/v1"
+        );
+        assert_eq!(
+            validate_base_url("http://127.0.0.1:8080/v1").unwrap(),
+            "http://127.0.0.1:8080/v1"
+        );
+        assert_eq!(
+            validate_base_url("http://localhost:3000").unwrap(),
+            "http://localhost:3000"
+        );
+        assert!(validate_base_url("http://api.deepseek.com").is_err());
+        assert!(validate_base_url("http://127.0.0.1").is_err());
+        assert!(validate_base_url("https://user:pass@api.deepseek.com").is_err());
+        assert!(validate_base_url("https://api.deepseek.com?x=1").is_err());
+        assert!(validate_base_url("https://api.deepseek.com#frag").is_err());
+        assert!(validate_base_url("https://").is_err());
+
+        let bad_req = serde_json::to_vec(&json!({
+            "base_url": "http://evil.example.com",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .unwrap();
+        assert!(parse_input(&bad_req).is_err());
     }
 }
