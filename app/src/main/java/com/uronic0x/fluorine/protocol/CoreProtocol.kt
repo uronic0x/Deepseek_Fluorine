@@ -55,23 +55,13 @@ data class WorkToolsConfig(
         if (git) out.addAll(GIT_TOOL_NAMES)
         if (shellExec) out.addAll(SHELL_TOOL_NAMES)
         if (deviceControl) out.addAll(DEVICE_CONTROL_TOOL_NAMES)
-        val canonicalDisabled = disabledTools.mapTo(mutableSetOf()) { raw ->
-            when (raw) {
-                "calc_eval" -> "calc"
-                "stats_summary" -> "stats"
-                else -> raw
-            }
-        }
+        val canonicalDisabled = disabledTools.mapTo(mutableSetOf()) { canonicalToolName(it) }
         out.removeAll(canonicalDisabled)
         return out
     }
 
     fun isToolEnabled(rawName: String): Boolean {
-        val canonical = when (rawName) {
-            "calc_eval" -> "calc"
-            "stats_summary" -> "stats"
-            else -> rawName
-        }
+        val canonical = canonicalToolName(rawName)
         return canonical in enabledToolNames()
     }
 
@@ -82,18 +72,27 @@ data class WorkToolsConfig(
         .put("git", git)
         .put("shell_exec", shellExec)
         .put("device_control", deviceControl)
-        .put("disabled_tools", JSONArray(disabledTools.sorted()))
+        .put("disabled_tools", JSONArray(disabledTools.map { canonicalToolName(it) }.distinct().sorted()))
 
     companion object {
+        fun canonicalToolName(raw: String): String = when (raw.trim()) {
+            "calc_eval" -> "calc"
+            "stats_summary" -> "stats"
+            "git_cmd" -> "git_inspect"
+            "termux_api" -> "termux_device"
+            "self_adb" -> "android_ui"
+            else -> raw.trim()
+        }
+
         val DETERMINISTIC_TOOL_NAMES = setOf(
             "calc", "stats", "unit_convert", "date_calc", "text_metrics",
             "json_query", "csv_summary", "text_diff", "encode_hash"
         )
-        val WORKSPACE_READ_TOOL_NAMES = setOf("fs_list", "fs_read", "fs_search")
+        val WORKSPACE_READ_TOOL_NAMES = setOf("device_probe", "fs_list", "fs_read", "fs_search")
         val WORKSPACE_WRITE_TOOL_NAMES = setOf("fs_write", "fs_edit")
-        val GIT_TOOL_NAMES = setOf("git_cmd")
+        val GIT_TOOL_NAMES = setOf("git_inspect")
         val SHELL_TOOL_NAMES = setOf("shell_exec")
-        val DEVICE_CONTROL_TOOL_NAMES = setOf("termux_api", "self_adb")
+        val DEVICE_CONTROL_TOOL_NAMES = setOf("termux_device", "android_ui")
 
         val ALL_DESCRIPTORS = listOf(
             ToolDescriptor("calc", "deterministic", "calc · 数学表达式计算"),
@@ -105,15 +104,16 @@ data class WorkToolsConfig(
             ToolDescriptor("csv_summary", "deterministic", "csv_summary · CSV 汇总统计"),
             ToolDescriptor("text_diff", "deterministic", "text_diff · 文本逐行比对"),
             ToolDescriptor("encode_hash", "deterministic", "encode_hash · 编解码与哈希"),
+            ToolDescriptor("device_probe", "workspace_read", "device_probe · 运行环境与工具探测"),
             ToolDescriptor("fs_list", "workspace_read", "fs_list · 列举工作区目录"),
             ToolDescriptor("fs_read", "workspace_read", "fs_read · 读取工作区文本"),
             ToolDescriptor("fs_search", "workspace_read", "fs_search · 搜索工作区文本"),
             ToolDescriptor("fs_write", "workspace_write", "fs_write · 写入或追加文件"),
             ToolDescriptor("fs_edit", "workspace_write", "fs_edit · 局部替换编辑文件"),
-            ToolDescriptor("git_cmd", "git", "git_cmd · Git 仓库检查"),
+            ToolDescriptor("git_inspect", "git", "git_inspect · Git 仓库检查"),
             ToolDescriptor("shell_exec", "shell_exec", "shell_exec · 任意 Shell 命令"),
-            ToolDescriptor("termux_api", "device_control", "termux_api · Termux 设备接口"),
-            ToolDescriptor("self_adb", "device_control", "self_adb · Android 本机诊断与控制")
+            ToolDescriptor("termux_device", "device_control", "termux_device · Termux 设备接口"),
+            ToolDescriptor("android_ui", "device_control", "android_ui · Android 本机诊断与控制")
         )
 
         fun fromJson(obj: JSONObject?): WorkToolsConfig {
@@ -122,7 +122,7 @@ data class WorkToolsConfig(
             val arr = obj.optJSONArray("disabled_tools")
             if (arr != null) {
                 for (i in 0 until arr.length()) {
-                    val s = arr.optString(i, "").trim()
+                    val s = canonicalToolName(arr.optString(i, ""))
                     if (s.isNotEmpty()) disabled.add(s)
                 }
             }
@@ -288,6 +288,186 @@ object CoreProtocol {
     const val DEFAULT_MAX_HISTORY_MESSAGES = 64
     const val MAX_HISTORY_MESSAGES = 1000
 
+    const val MAX_STORE_JSON_BYTES = 16 * 1024 * 1024
+    const val MAX_SESSIONS = 200
+    const val MAX_MESSAGES_PER_SESSION = 2000
+    const val MAX_ATTACHMENTS_PER_MESSAGE = 20
+    const val MAX_TOOL_CALLS_PER_MESSAGE = 500
+
+    private val ALLOWED_PARSE_PURPOSES = setOf(
+        "user_data",
+        "text_recognition",
+        "rich_layout_recognition"
+    )
+    private val ALLOWED_ATTACHMENT_KINDS = setOf("image", "document", "text")
+
+    /**
+     * Strictly validates an upstream API Base URL to match Rust's `policy::validate_base_url`:
+     * - Allows `https://<valid-host>[:port][/path]`
+     * - Allows local loopback `http://127.0.0.1:<port>[/path]` and `http://localhost:<port>[/path]`
+     * - Rejects plaintext remote HTTP, userinfo (`@`), query (`?`), fragment (`#`), control chars, and `..`.
+     */
+    fun validateBaseUrl(rawUrl: String): Result<String> {
+        val url = rawUrl.trim().trimEnd('/')
+        if (url.isEmpty()) {
+            return Result.failure(IllegalArgumentException("Base URL 不能为空"))
+        }
+        if (url.length > 2048 || url.any { ch ->
+                ch.code <= 0x20 || ch.code == 0x7f || ch == '?' || ch == '#' || ch == '@' || ch == '\\'
+            }
+        ) {
+            return Result.failure(
+                IllegalArgumentException("Base URL 包含非法字符（不允许凭据、查询参数、片段或空白字符）")
+            )
+        }
+
+        val isHttps: Boolean
+        val rest: String
+        when {
+            url.startsWith("https://") -> {
+                isHttps = true
+                rest = url.removePrefix("https://")
+            }
+            url.startsWith("http://") -> {
+                isHttps = false
+                rest = url.removePrefix("http://")
+            }
+            else -> {
+                return Result.failure(
+                    IllegalArgumentException("Base URL 仅支持 https:// 或本地 http://127.0.0.1:<port> / http://localhost:<port>")
+                )
+            }
+        }
+
+        val slashIdx = rest.indexOf('/')
+        val authority = if (slashIdx >= 0) rest.substring(0, slashIdx) else rest
+        val path = if (slashIdx >= 0) rest.substring(slashIdx) else ""
+        if (authority.isEmpty() || path.contains("..")) {
+            return Result.failure(IllegalArgumentException("Base URL 主机或路径格式不正确"))
+        }
+
+        fun validPort(portStr: String): Boolean {
+            if (portStr.isEmpty() || !portStr.all { it in '0'..'9' }) return false
+            val p = portStr.toIntOrNull() ?: return false
+            return p in 1..65535
+        }
+
+        if (isHttps) {
+            val host: String
+            val portOpt: String?
+            val isIpv6 = authority.startsWith("[")
+            if (isIpv6) {
+                val close = authority.indexOf(']')
+                if (close <= 1) {
+                    return Result.failure(IllegalArgumentException("Base URL IPv6 主机格式不正确"))
+                }
+                host = authority.substring(1, close)
+                val rem = authority.substring(close + 1)
+                if (!host.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' || it == ':' }) {
+                    return Result.failure(IllegalArgumentException("Base URL IPv6 主机格式不正确"))
+                }
+                portOpt = when {
+                    rem.isEmpty() -> null
+                    rem.startsWith(":") -> rem.substring(1)
+                    else -> return Result.failure(IllegalArgumentException("Base URL 端口格式不正确"))
+                }
+            } else {
+                val colon = authority.lastIndexOf(':')
+                if (colon >= 0) {
+                    host = authority.substring(0, colon)
+                    portOpt = authority.substring(colon + 1)
+                } else {
+                    host = authority
+                    portOpt = null
+                }
+            }
+            if (host.isEmpty() ||
+                host.startsWith(".") ||
+                host.endsWith(".") ||
+                host.contains("..") ||
+                (!isIpv6 && !host.all { it.isLetterOrDigit() || it == '-' || it == '.' })
+            ) {
+                return Result.failure(IllegalArgumentException("Base URL 主机名格式不正确"))
+            }
+            if (portOpt != null && !validPort(portOpt)) {
+                return Result.failure(IllegalArgumentException("Base URL 端口范围无效"))
+            }
+            return Result.success(url)
+        }
+
+        val colon = authority.lastIndexOf(':')
+        if (colon <= 0) {
+            return Result.failure(
+                IllegalArgumentException("明文 HTTP 仅允许本地回环地址 http://127.0.0.1:<port> 或 http://localhost:<port>")
+            )
+        }
+        val host = authority.substring(0, colon)
+        val portStr = authority.substring(colon + 1)
+        if ((host != "127.0.0.1" && host != "localhost") || !validPort(portStr)) {
+            return Result.failure(
+                IllegalArgumentException("明文 HTTP 仅允许本地回环地址 http://127.0.0.1:<port> 或 http://localhost:<port>")
+            )
+        }
+        return Result.success(url)
+    }
+
+    /**
+     * Sanitizes attachment metadata before persistence, import, or upload to prevent
+     * multipart header injection, invalid purpose tokens, or imported path traversal.
+     */
+    fun sanitizeAttachment(att: ChatAttachment, stripLocalPath: Boolean = false): ChatAttachment {
+        val safeName = att.name
+            .replace("\r", "")
+            .replace("\n", "")
+            .replace("/", "_")
+            .replace("\\", "_")
+            .replace("\"", "_")
+            .filter { it.code >= 0x20 && it.code != 0x7f }
+            .trim()
+            .take(160)
+            .ifEmpty { "file" }
+
+        val rawMime = att.mimeType
+            .substringBefore(';')
+            .trim()
+            .lowercase(Locale.ROOT)
+        val safeMime = if (
+            rawMime.contains('/') &&
+            rawMime.length <= 128 &&
+            rawMime.all { it in 'a'..'z' || it in '0'..'9' || it == '/' || it == '.' || it == '+' || it == '-' }
+        ) {
+            rawMime
+        } else {
+            "application/octet-stream"
+        }
+
+        val safeKind = att.kind.trim().lowercase(Locale.ROOT).let {
+            if (it in ALLOWED_ATTACHMENT_KINDS) it else "document"
+        }
+        val safePurpose = att.parsePurpose.trim().let {
+            if (it in ALLOWED_PARSE_PURPOSES) it else "user_data"
+        }
+        val safeFileId = att.fileId
+            .filter { it.code > 0x20 && it.code != 0x7f }
+            .take(200)
+        val safeLocalPath = if (stripLocalPath) {
+            ""
+        } else {
+            att.localPath.filter { it.code >= 0x20 && it.code != 0x7f }.take(1024)
+        }
+
+        return att.copy(
+            id = att.id.trim().take(128).ifEmpty { "att" },
+            name = safeName,
+            mimeType = safeMime,
+            kind = safeKind,
+            localPath = safeLocalPath,
+            sizeBytes = att.sizeBytes.coerceAtLeast(0L),
+            fileId = safeFileId,
+            parsePurpose = safePurpose
+        )
+    }
+
     /** Slice whole user/assistant groups; tool subturns remain attached to their assistant. */
     fun recentContext(history: List<ContextTurn>, maxMessages: Int): List<ContextTurn> {
         val count = maxMessages.coerceIn(4, MAX_HISTORY_MESSAGES)
@@ -415,7 +595,8 @@ object CoreProtocol {
         return try {
             val obj = JSONObject(rawJson)
             val ok = obj.optBoolean("ok", false)
-            val err = obj.optString("error", "")
+            val err = obj.optJSONObject("error")?.optString("message", "")?.takeIf { it.isNotBlank() }
+                ?: obj.optString("error", "")
 
             val sources = parseSourcesArray(obj.optJSONArray("sources"))
             val citations = parseCitationsArray(obj.optJSONArray("citations"))
@@ -438,7 +619,9 @@ object CoreProtocol {
             val cacheHitTokens = usage?.optInt("prompt_cache_hit_tokens", 0) ?: 0
             val cacheMissTokens = usage?.optInt("prompt_cache_miss_tokens", 0) ?: 0
             val serverToolUse = usage?.optJSONObject("server_tool_use")?.let { stu ->
-                stu.optInt("web_search_requests", 0) + stu.optInt("read_url_requests", 0)
+                val searchCount = stu.optInt("tool_search", stu.optInt("web_search_requests", 0))
+                val fetchCount = stu.optInt("tool_fetch", stu.optInt("read_url_requests", 0))
+                searchCount + fetchCount
             } ?: 0
             val rounds = obj.optInt("rounds", 1)
 
@@ -751,36 +934,43 @@ object CoreProtocol {
         return root.toString()
     }
 
-    fun deserializeSessionsStore(rawJson: String): Pair<List<ConversationSession>, String?> {
-        if (rawJson.isBlank()) return emptyList<ConversationSession>() to null
-        return try {
+    fun deserializeSessionsStoreChecked(rawJson: String): Result<Pair<List<ConversationSession>, String?>> {
+        if (rawJson.isBlank()) return Result.success(emptyList<ConversationSession>() to null)
+        if (rawJson.toByteArray(Charsets.UTF_8).size > MAX_STORE_JSON_BYTES) {
+            return Result.failure(IllegalArgumentException("会话数据超过 16 MiB 上限，已拒绝解析"))
+        }
+        return runCatching {
             val root = JSONObject(rawJson)
             val activeId = root.optString("active_session_id", "").takeIf { it.isNotBlank() }
             val sessionsArr = root.optJSONArray("sessions") ?: JSONArray()
             val sessions = mutableListOf<ConversationSession>()
-            for (i in 0 until sessionsArr.length()) {
+            val limit = minOf(sessionsArr.length(), MAX_SESSIONS)
+            for (i in 0 until limit) {
                 val obj = sessionsArr.optJSONObject(i) ?: continue
                 sessions.add(deserializeSingleSessionObject(obj))
             }
             normalizeRestoredSessions(sessions, activeId)
-        } catch (_: Exception) {
-            emptyList<ConversationSession>() to null
         }
+    }
+
+    fun deserializeSessionsStore(rawJson: String): Pair<List<ConversationSession>, String?> {
+        return deserializeSessionsStoreChecked(rawJson).getOrElse { emptyList<ConversationSession>() to null }
     }
 
     private fun serializeAttachments(list: List<ChatAttachment>): JSONArray {
         val arr = JSONArray()
         for (a in list) {
+            val clean = sanitizeAttachment(a)
             arr.put(
                 JSONObject()
-                    .put("id", a.id)
-                    .put("name", a.name)
-                    .put("mime_type", a.mimeType)
-                    .put("kind", a.kind)
-                    .put("local_path", a.localPath)
-                    .put("size_bytes", a.sizeBytes)
-                    .put("file_id", a.fileId)
-                    .put("parse_purpose", a.parsePurpose)
+                    .put("id", clean.id)
+                    .put("name", clean.name)
+                    .put("mime_type", clean.mimeType)
+                    .put("kind", clean.kind)
+                    .put("local_path", clean.localPath)
+                    .put("size_bytes", clean.sizeBytes)
+                    .put("file_id", clean.fileId)
+                    .put("parse_purpose", clean.parsePurpose)
             )
         }
         return arr
@@ -789,18 +979,21 @@ object CoreProtocol {
     private fun deserializeAttachments(arr: JSONArray?): List<ChatAttachment> {
         if (arr == null) return emptyList()
         val list = mutableListOf<ChatAttachment>()
-        for (i in 0 until arr.length()) {
+        val limit = minOf(arr.length(), MAX_ATTACHMENTS_PER_MESSAGE)
+        for (i in 0 until limit) {
             val o = arr.optJSONObject(i) ?: continue
             list.add(
-                ChatAttachment(
-                    id = o.optString("id", "att_$i"),
-                    name = o.optString("name", "file"),
-                    mimeType = o.optString("mime_type", "application/octet-stream"),
-                    kind = o.optString("kind", "document"),
-                    localPath = o.optString("local_path", ""),
-                    sizeBytes = o.optLong("size_bytes", 0L),
-                    fileId = o.optString("file_id", ""),
-                    parsePurpose = o.optString("parse_purpose", "user_data")
+                sanitizeAttachment(
+                    ChatAttachment(
+                        id = o.optString("id", "att_$i"),
+                        name = o.optString("name", "file"),
+                        mimeType = o.optString("mime_type", "application/octet-stream"),
+                        kind = o.optString("kind", "document"),
+                        localPath = o.optString("local_path", ""),
+                        sizeBytes = o.optLong("size_bytes", 0L),
+                        fileId = o.optString("file_id", ""),
+                        parsePurpose = o.optString("parse_purpose", "user_data")
+                    )
                 )
             )
         }
@@ -898,15 +1091,16 @@ object CoreProtocol {
     private fun deserializeSingleSessionObject(obj: JSONObject): ConversationSession {
         val msgList = mutableListOf<ChatMessage>()
         val msgArr = obj.optJSONArray("chatMessages") ?: JSONArray()
-        for (i in 0 until msgArr.length()) {
+        val msgLimit = minOf(msgArr.length(), MAX_MESSAGES_PER_SESSION)
+        for (i in 0 until msgLimit) {
             val m = msgArr.optJSONObject(i) ?: continue
             val tags = mutableListOf<String>()
             val tArr = m.optJSONArray("tags") ?: JSONArray()
-            for (j in 0 until tArr.length()) tags.add(tArr.optString(j))
+            for (j in 0 until minOf(tArr.length(), 16)) tags.add(tArr.optString(j))
 
             val sources = parseSourcesArray(m.optJSONArray("sources"))
             val citations = parseCitationsArray(m.optJSONArray("citations"))
-            val toolCalls = parseToolCallsArray(m.optJSONArray("localToolCalls"))
+            val toolCalls = parseToolCallsArray(m.optJSONArray("localToolCalls")).take(MAX_TOOL_CALLS_PER_MESSAGE)
             val attachments = deserializeAttachments(m.optJSONArray("attachments"))
 
             msgList.add(
@@ -930,12 +1124,13 @@ object CoreProtocol {
 
         val ctxList = mutableListOf<ContextTurn>()
         val ctxArr = obj.optJSONArray("contextHistory") ?: JSONArray()
-        for (i in 0 until ctxArr.length()) {
+        val ctxLimit = minOf(ctxArr.length(), MAX_MESSAGES_PER_SESSION)
+        for (i in 0 until ctxLimit) {
             val c = ctxArr.optJSONObject(i) ?: continue
             val subturns = mutableListOf<String>()
             val subArr = c.optJSONArray("subturn_messages")
             if (subArr != null) {
-                for (j in 0 until subArr.length()) {
+                for (j in 0 until minOf(subArr.length(), MAX_TOOL_CALLS_PER_MESSAGE * 2)) {
                     val s = subArr.optString(j, "")
                     if (s.isNotBlank()) subturns.add(s)
                 }
@@ -952,10 +1147,12 @@ object CoreProtocol {
         }
 
         val now = System.currentTimeMillis()
+        val rawMode = obj.optString("mode", "chat")
+        val safeMode = if (rawMode == "work") "work" else "chat"
         return ConversationSession(
             id = obj.optString("id", "session_$now"),
             title = obj.optString("title", "未命名会话"),
-            mode = obj.optString("mode", "chat"),
+            mode = safeMode,
             createdAt = obj.optLong("created_at", now),
             updatedAt = obj.optLong("updated_at", now),
             chatMessages = msgList,
@@ -977,7 +1174,9 @@ object CoreProtocol {
     }
 
     fun deserializeSession(rawJson: String): Pair<List<ChatMessage>, List<ContextTurn>> {
-        if (rawJson.isBlank()) return emptyList<ChatMessage>() to emptyList()
+        if (rawJson.isBlank() || rawJson.toByteArray(Charsets.UTF_8).size > MAX_STORE_JSON_BYTES) {
+            return emptyList<ChatMessage>() to emptyList()
+        }
         return try {
             val s = deserializeSingleSessionObject(JSONObject(rawJson))
             s.chatMessages to s.contextHistory

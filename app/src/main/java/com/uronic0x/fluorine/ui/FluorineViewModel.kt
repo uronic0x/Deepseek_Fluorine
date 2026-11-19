@@ -4,8 +4,10 @@ import android.app.Application
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.util.Base64
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.uronic0x.fluorine.BuildConfig
 import com.uronic0x.fluorine.bridge.FluorineBridge
 import com.uronic0x.fluorine.protocol.ChatAttachment
 import com.uronic0x.fluorine.protocol.ChatMessage
@@ -22,18 +24,19 @@ import com.uronic0x.fluorine.ui.components.FluorineSettingsDraft
 import com.uronic0x.fluorine.ui.theme.AppThemeMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.InputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -118,13 +121,24 @@ data class FluorineUiState(
 
 class FluorineViewModel(application: Application) : AndroidViewModel(application) {
 
+    private data class PersistSnapshot(
+        val sessions: List<ConversationSession>,
+        val activeId: String
+    )
+
     private val prefs = application.getSharedPreferences("fluorine_prefs", Context.MODE_PRIVATE)
     private val sessionsStoreFile = File(application.filesDir, "sessions_store.json")
     private val legacySessionFile = File(application.filesDir, "session_state.json")
     private val attachmentsDir = File(application.filesDir, "attachments").apply { mkdirs() }
     private val cameraCapturesDir = File(application.filesDir, "camera_captures").apply { mkdirs() }
     private val workspaceDir: File = FluorineBridge.initWorkspace(application)
-    private val persistMutex = Mutex()
+
+    private val persistChannel = Channel<PersistSnapshot>(Channel.CONFLATED)
+    private val persistWriteLock = Any()
+    @Volatile
+    private var latestQueuedSnapshot: PersistSnapshot? = null
+    @Volatile
+    private var lastPersistedSnapshot: PersistSnapshot? = null
 
     private val _uiState = MutableStateFlow(FluorineUiState())
     val uiState: StateFlow<FluorineUiState> = _uiState.asStateFlow()
@@ -132,8 +146,29 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
     private var activeExecutionJob: Job? = null
 
     init {
+        FluorineBridge.initManagedDirs(application)
         CoreProtocol.AppLogger.info("App", "FluorineViewModel initialized; workspace=${workspaceDir.absolutePath}")
+        startPersistenceWorker()
         loadPersistedState()
+    }
+
+    private fun startPersistenceWorker() {
+        viewModelScope.launch(Dispatchers.IO) {
+            for (snapshot in persistChannel) {
+                withContext(NonCancellable) {
+                    writeSessionsSnapshotSync(snapshot)
+                }
+            }
+        }
+    }
+
+    override fun onCleared() {
+        persistChannel.close()
+        val pending = latestQueuedSnapshot
+        if (pending != null && pending !== lastPersistedSnapshot) {
+            writeSessionsSnapshotSync(pending)
+        }
+        super.onCleared()
     }
 
     private fun loadPersistedState() {
@@ -146,9 +181,11 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
         val defaultExpandTools = prefs.getBoolean("default_expand_tools", false)
         val defaultExpandSources = prefs.getBoolean("default_expand_sources", false)
 
-        val baseUrl = prefs.getString("base_url", CoreProtocol.DEFAULT_API_BASE_URL)
+        val rawStoredBaseUrl = prefs.getString("base_url", CoreProtocol.DEFAULT_API_BASE_URL)
             ?.ifBlank { CoreProtocol.DEFAULT_API_BASE_URL }
             ?: CoreProtocol.DEFAULT_API_BASE_URL
+        val baseUrl = CoreProtocol.validateBaseUrl(rawStoredBaseUrl)
+            .getOrDefault(CoreProtocol.DEFAULT_API_BASE_URL)
         val connectTimeoutSec = prefs.getInt("connect_timeout_sec", 20).coerceIn(5, 120)
         val readTimeoutSec = prefs.getInt("read_timeout_sec", 180).coerceIn(30, 600)
 
@@ -208,7 +245,7 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
         )
         val effectiveModel = customModel.ifBlank { savedModel }
         val effectiveWeb = if (effectiveModel == "deepseek-v4-pro" && !unlockWebSearch) false else savedWeb
-        val initialEngineLabel = "Fluorine · ${if (FluorineBridge.isRustJniLoaded) "Rust JNI" else "Kotlin 回退"}"
+        val initialEngineLabel = "Fluorine v${BuildConfig.VERSION_NAME} · ${if (FluorineBridge.isRustJniLoaded) "Rust JNI" else "Rust JNI 未加载"}"
 
         _uiState.update {
             it.copy(
@@ -291,14 +328,14 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
      * 避免把整段 JSON（runtime/available_bins/workspace…）直接铺在界面上。
      */
     private fun buildEngineLabel(infoRaw: String): String {
+        val engineKind = if (FluorineBridge.isRustJniLoaded) "Rust JNI" else "Rust JNI 未加载"
         val obj = runCatching { JSONObject(infoRaw) }.getOrNull()
-            ?: return "Fluorine · ${if (FluorineBridge.isRustJniLoaded) "Rust JNI" else "Kotlin 回退"}"
+            ?: return "Fluorine v${BuildConfig.VERSION_NAME} · $engineKind"
         val display = obj.optString("display_name", "").ifBlank { obj.optString("app_name", "Fluorine") }
-        val version = obj.optString("version", "")
+        val version = obj.optString("version", "").ifBlank { BuildConfig.VERSION_NAME }
         val subtitle = obj.optString("subtitle", "")
         val runtime = obj.optJSONObject("runtime")
         val arch = runtime?.optString("arch", "").orEmpty()
-        val engineKind = if (FluorineBridge.isRustJniLoaded) "Rust JNI" else "Kotlin 回退"
 
         return buildList {
             add(display + if (version.isNotBlank()) " v$version" else "")
@@ -307,9 +344,41 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
         }.joinToString(" · ")
     }
 
+    private fun readTextBounded(input: InputStream, maxBytes: Int): String {
+        val out = ByteArrayOutputStream()
+        val buf = ByteArray(16 * 1024)
+        var total = 0
+        while (true) {
+            val n = input.read(buf)
+            if (n <= 0) break
+            total += n
+            if (total > maxBytes) {
+                throw IllegalArgumentException("文件体积超过 ${CoreProtocol.formatFileSize(maxBytes.toLong())} 安全上限")
+            }
+            out.write(buf, 0, n)
+        }
+        return out.toString(Charsets.UTF_8.name())
+    }
+
+    private fun isManagedAttachmentPath(rawPath: String): Boolean {
+        if (rawPath.isBlank()) return false
+        return runCatching {
+            val target = File(rawPath).canonicalFile
+            if (!target.exists() || !target.isFile) return false
+            val targetPath = target.path
+            val attPrefix = attachmentsDir.canonicalFile.path + File.separator
+            val camPrefix = cameraCapturesDir.canonicalFile.path + File.separator
+            targetPath.startsWith(attPrefix) || targetPath.startsWith(camPrefix)
+        }.getOrDefault(false)
+    }
+
     private fun loadSessionsFromDisk(): Pair<List<ConversationSession>, String> {
         if (sessionsStoreFile.exists()) {
-            val raw = runCatching { sessionsStoreFile.readText(Charsets.UTF_8) }.getOrDefault("")
+            val raw = runCatching {
+                sessionsStoreFile.inputStream().use { readTextBounded(it, CoreProtocol.MAX_STORE_JSON_BYTES) }
+            }.onFailure { err ->
+                CoreProtocol.AppLogger.error("Storage", "Skip oversized/unreadable sessions_store.json: ${err.message}")
+            }.getOrDefault("")
             val (list, activeId) = CoreProtocol.deserializeSessionsStore(raw)
             if (list.isNotEmpty()) {
                 val validActive = list.firstOrNull { it.id == activeId }?.id ?: list.first().id
@@ -317,7 +386,11 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
             }
         }
         if (legacySessionFile.exists()) {
-            val raw = runCatching { legacySessionFile.readText(Charsets.UTF_8) }.getOrDefault("")
+            val raw = runCatching {
+                legacySessionFile.inputStream().use { readTextBounded(it, CoreProtocol.MAX_STORE_JSON_BYTES) }
+            }.onFailure { err ->
+                CoreProtocol.AppLogger.error("Storage", "Skip oversized/unreadable session_state.json: ${err.message}")
+            }.getOrDefault("")
             val (msgs, ctx) = CoreProtocol.deserializeSession(raw)
             if (msgs.isNotEmpty()) {
                 val firstTitle = msgs.firstOrNull { it.role == "user" }?.text?.take(22) ?: "历史对话"
@@ -339,24 +412,29 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
     }
 
     /**
-     * Serialized atomic write using a Mutex + temp file + rename so concurrent IO coroutines
-     * never race on `sessions_store.json.tmp` or corrupt `sessions_store.json`.
+     * Enqueues the latest session snapshot onto a single CONFLATED IO worker channel so
+     * rapid consecutive mutations always persist in strictly monotonic latest-wins order.
      */
     private fun persistSessionsToDisk(sessions: List<ConversationSession>, activeId: String) {
-        viewModelScope.launch(Dispatchers.IO) {
-            persistMutex.withLock {
-                val res = runCatching {
-                    val json = CoreProtocol.serializeSessionsStore(sessions, activeId)
-                    val tmp = File(sessionsStoreFile.parentFile, "sessions_store.json.tmp")
-                    tmp.writeText(json, Charsets.UTF_8)
-                    if (!tmp.renameTo(sessionsStoreFile)) {
-                        sessionsStoreFile.writeText(json, Charsets.UTF_8)
-                        tmp.delete()
-                    }
+        val snapshot = PersistSnapshot(sessions = sessions, activeId = activeId)
+        latestQueuedSnapshot = snapshot
+        persistChannel.trySend(snapshot)
+    }
+
+    private fun writeSessionsSnapshotSync(snapshot: PersistSnapshot) {
+        synchronized(persistWriteLock) {
+            val res = runCatching {
+                val json = CoreProtocol.serializeSessionsStore(snapshot.sessions, snapshot.activeId)
+                val tmp = File(sessionsStoreFile.parentFile, "sessions_store.json.tmp")
+                tmp.writeText(json, Charsets.UTF_8)
+                if (!tmp.renameTo(sessionsStoreFile)) {
+                    sessionsStoreFile.writeText(json, Charsets.UTF_8)
+                    tmp.delete()
                 }
-                res.onFailure { err ->
-                    CoreProtocol.AppLogger.error("Storage", "Failed to save sessions_store.json: ${err.message}")
-                }
+                lastPersistedSnapshot = snapshot
+            }
+            res.onFailure { err ->
+                CoreProtocol.AppLogger.error("Storage", "Failed to save sessions_store.json: ${err.message}")
             }
         }
     }
@@ -964,7 +1042,13 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
         } else {
             _uiState.value.useWeb
         }
-        val normalizedBaseUrl = draft.baseUrl.trim().ifEmpty { CoreProtocol.DEFAULT_API_BASE_URL }
+        val rawBaseUrl = draft.baseUrl.trim().ifEmpty { CoreProtocol.DEFAULT_API_BASE_URL }
+        val normalizedBaseUrl = CoreProtocol.validateBaseUrl(rawBaseUrl).getOrElse { err ->
+            _uiState.update {
+                it.copy(transientNotice = "设置未保存：${err.message ?: "Base URL 不合法"}")
+            }
+            return
+        }
         val clampedTokens = draft.maxTokens.coerceIn(256, 393216)
 
         val chatPromptToSave = draft.customChatSystemPrompt.ifBlank { CoreProtocol.DEFAULT_CHAT_SYSTEM_PROMPT }
@@ -1052,9 +1136,13 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
     fun discoverCapabilities(overrideKey: String? = null, overrideBaseUrl: String? = null) {
         val s = _uiState.value
         val key = (overrideKey ?: s.apiKey).trim()
-        val baseUrl = (overrideBaseUrl ?: s.baseUrl).trim().ifEmpty { CoreProtocol.DEFAULT_API_BASE_URL }
+        val rawBase = (overrideBaseUrl ?: s.baseUrl).trim().ifEmpty { CoreProtocol.DEFAULT_API_BASE_URL }
         if (key.isEmpty()) {
             _uiState.update { it.copy(discoverySummary = "请先填写 API Key") }
+            return
+        }
+        val baseUrl = CoreProtocol.validateBaseUrl(rawBase).getOrElse { err ->
+            _uiState.update { it.copy(discoverySummary = "探测失败: ${err.message}") }
             return
         }
         _uiState.update { it.copy(isDiscovering = true, discoverySummary = "正在探测上游接口与多模态能力...") }
@@ -1100,7 +1188,10 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
                 val enabledCount = _uiState.value.workToolsConfig.enabledToolNames().size
                 "连接成功 ($baseUrl) · 可用模型: ${modelList.joinToString(", ").ifEmpty { "默认" }} · 当前已启用工具: $enabledCount 个"
             } else {
-                "探测失败: ${parsed?.optString("error", raw)}"
+                val errText = parsed?.optJSONObject("error")?.optString("message", "")?.takeIf { it.isNotBlank() }
+                    ?: parsed?.optString("error", "")?.takeIf { it.isNotBlank() }
+                    ?: raw
+                "探测失败: $errText"
             }
             _uiState.update {
                 it.copy(
@@ -1335,11 +1426,13 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch(Dispatchers.IO) {
             val res = runCatching {
                 val raw = context.contentResolver.openInputStream(sourceUri)
-                    ?.bufferedReader(Charsets.UTF_8)
-                    ?.use { it.readText() }
+                    ?.use { readTextBounded(it, CoreProtocol.MAX_STORE_JSON_BYTES) }
                     ?: throw IllegalStateException("无法读取导入文件")
-                val (imported, _) = CoreProtocol.deserializeSessionsStore(raw)
-                if (imported.isEmpty()) {
+                val storeRes = CoreProtocol.deserializeSessionsStoreChecked(raw)
+                val imported = storeRes.getOrElse { err ->
+                    throw IllegalArgumentException(err.message ?: "会话文件格式无效")
+                }.first
+                val resolved = if (imported.isEmpty()) {
                     val (legacyMsgs, legacyCtx) = CoreProtocol.deserializeSession(raw)
                     if (legacyMsgs.isEmpty()) throw IllegalArgumentException("未找到有效会话数据")
                     listOf(
@@ -1355,6 +1448,25 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
                     )
                 } else {
                     imported
+                }
+                // Strip untrusted localPath and sanitize all attachment metadata on import
+                resolved.map { sess ->
+                    sess.copy(
+                        chatMessages = sess.chatMessages.map { msg ->
+                            msg.copy(
+                                attachments = msg.attachments.map {
+                                    CoreProtocol.sanitizeAttachment(it, stripLocalPath = true)
+                                }
+                            )
+                        },
+                        contextHistory = sess.contextHistory.map { turn ->
+                            turn.copy(
+                                attachments = turn.attachments.map {
+                                    CoreProtocol.sanitizeAttachment(it, stripLocalPath = true)
+                                }
+                            )
+                        }
+                    )
                 }
             }
             withContext(Dispatchers.Main) {
@@ -1521,10 +1633,25 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
             }
 
             try {
-                // Step 1: Upload document/text attachments (and >4 MiB images) via DeepSeek Files API
+                // Step 1: Validate containment and upload document/text attachments (and >4 MiB images) via DeepSeek Files API
                 val preparedAttachments = mutableListOf<ChatAttachment>()
-                for (att in attachmentsToUse) {
+                for (rawAtt in attachmentsToUse) {
+                    val att = CoreProtocol.sanitizeAttachment(rawAtt)
                     val needsFilesApi = att.kind != "image" || att.sizeBytes > 4L * 1024L * 1024L
+                    if (att.fileId.isBlank()) {
+                        val validLocal = withContext(Dispatchers.IO) { isManagedAttachmentPath(att.localPath) }
+                        if (!validLocal) {
+                            _uiState.update {
+                                it.copy(
+                                    isBusy = false,
+                                    activeRequestId = 0L,
+                                    taskStatusText = "附件不可用",
+                                    transientNotice = "附件 ${att.name} 的本地文件不可用（可能是导入的历史会话），请重新选择后再发送"
+                                )
+                            }
+                            return@launch
+                        }
+                    }
                     if (needsFilesApi && att.fileId.isBlank()) {
                         _uiState.update { it.copy(taskStatusText = "正在上传解析：${att.name}") }
                         val uploadRaw = withContext(Dispatchers.IO) {
@@ -1538,7 +1665,9 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
                         }
                         val upObj = runCatching { JSONObject(uploadRaw) }.getOrNull()
                         if (upObj?.optBoolean("ok", false) != true) {
-                            val errMsg = upObj?.optString("error", uploadRaw) ?: "文件上传失败"
+                            val errMsg = upObj?.optJSONObject("error")?.optString("message", "")?.takeIf { it.isNotBlank() }
+                                ?: upObj?.optString("error", "")?.takeIf { it.isNotBlank() }
+                                ?: "文件上传失败"
                             _uiState.update {
                                 it.copy(
                                     isBusy = false,
@@ -1610,45 +1739,33 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
                     persist = true
                 )
 
-                // Step 3: Build immutable payload from launching snapshot
-                val messagesArr = buildHistoryMessagesJson(
-                    history = snapshot.contextHistory,
-                    maxHistoryTurns = snapshot.maxHistoryTurns,
-                    preserveToolSubturns = isWork
-                )
-                if (snapshot.enableLatestReminder) {
-                    messagesArr.put(
-                        JSONObject()
-                            .put("role", "latest_reminder")
-                            .put("content", CoreProtocol.buildLatestReminder(Date(), "App"))
+                // Step 3: Build immutable payload (including OpenAI/DeepSeek content blocks for Rust) off Main thread
+                val reqObj = withContext(Dispatchers.IO) {
+                    val messagesArr = buildHistoryMessagesJson(
+                        history = snapshot.contextHistory,
+                        maxHistoryTurns = snapshot.maxHistoryTurns,
+                        preserveToolSubturns = isWork
                     )
-                }
-                val userReqMsg = JSONObject()
-                    .put("role", "user")
-                    .put("content", effectivePrompt)
-                if (preparedAttachments.isNotEmpty()) {
-                    val attArr = JSONArray()
-                    for (att in preparedAttachments) {
-                        attArr.put(
+                    if (snapshot.enableLatestReminder) {
+                        messagesArr.put(
                             JSONObject()
-                                .put("kind", att.kind)
-                                .put("name", att.name)
-                                .put("mime_type", att.mimeType)
-                                .put("local_path", att.localPath)
-                                .put("file_id", att.fileId)
+                                .put("role", "latest_reminder")
+                                .put("content", CoreProtocol.buildLatestReminder(Date(), "App"))
                         )
                     }
-                    userReqMsg.put("attachments", attArr)
-                }
-                messagesArr.put(userReqMsg)
+                    val userReqMsg = JSONObject()
+                        .put("role", "user")
+                        .put("content", buildUserContentForRust(effectivePrompt, preparedAttachments))
+                    messagesArr.put(userReqMsg)
 
-                val reqObj = buildEngineRequestJson(
-                    state = snapshot,
-                    stage = if (isWork) "work" else "chat",
-                    useLocalTools = isWork,
-                    systemPrompt = if (isWork) snapshot.customWorkSystemPrompt else snapshot.customChatSystemPrompt,
-                    messagesArr = messagesArr
-                )
+                    buildEngineRequestJson(
+                        state = snapshot,
+                        stage = if (isWork) "work" else "chat",
+                        useLocalTools = isWork,
+                        systemPrompt = if (isWork) snapshot.customWorkSystemPrompt else snapshot.customChatSystemPrompt,
+                        messagesArr = messagesArr
+                    )
+                }
 
                 // Step 4: Execute streaming loop and reflect incremental updates live on UI
                 val liveThinkingSb = StringBuilder()
@@ -1856,6 +1973,54 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
     }
 
     /**
+     * Converts a user prompt + attachments into standard OpenAI/DeepSeek `content`
+     * (plain string or content block array with `file` / `image_url` / `text`) expected by Rust `policy::build_payload`.
+     */
+    private fun buildUserContentForRust(
+        prompt: String,
+        attachments: List<ChatAttachment>
+    ): Any {
+        if (attachments.isEmpty()) return prompt
+        val blocks = JSONArray()
+        for (rawAtt in attachments) {
+            val att = CoreProtocol.sanitizeAttachment(rawAtt)
+            if (att.fileId.isNotBlank()) {
+                blocks.put(
+                    JSONObject()
+                        .put("type", "file")
+                        .put("file_id", att.fileId)
+                )
+            } else if (att.kind == "image" && isManagedAttachmentPath(att.localPath)) {
+                val file = File(att.localPath)
+                if (file.length() in 1L..(4L * 1024L * 1024L)) {
+                    val b64 = runCatching {
+                        Base64.encodeToString(file.readBytes(), Base64.NO_WRAP)
+                    }.getOrNull()
+                    if (!b64.isNullOrEmpty()) {
+                        blocks.put(
+                            JSONObject()
+                                .put("type", "image_url")
+                                .put(
+                                    "image_url",
+                                    JSONObject().put("url", "data:${att.mimeType};base64,$b64")
+                                )
+                        )
+                    }
+                }
+            }
+        }
+        if (blocks.length() == 0) return prompt
+        if (prompt.isNotBlank()) {
+            blocks.put(
+                JSONObject()
+                    .put("type", "text")
+                    .put("text", prompt)
+            )
+        }
+        return blocks
+    }
+
+    /**
      * Atomic turn-group slicing:
      * Preserves `ContextTurn(user) + ContextTurn(assistant)` pairs cleanly without breaking
      * tool sub-turns (`assistant(tool_calls)` -> `tool` replies) or dropping `reasoning_content`.
@@ -1872,21 +2037,7 @@ class FluorineViewModel(application: Application) : AndroidViewModel(application
             if (turn.role == "user") {
                 val userObj = JSONObject()
                     .put("role", "user")
-                    .put("content", turn.content)
-                if (turn.attachments.isNotEmpty()) {
-                    val attArr = JSONArray()
-                    for (att in turn.attachments) {
-                        attArr.put(
-                            JSONObject()
-                                .put("kind", att.kind)
-                                .put("name", att.name)
-                                .put("mime_type", att.mimeType)
-                                .put("local_path", att.localPath)
-                                .put("file_id", att.fileId)
-                        )
-                    }
-                    userObj.put("attachments", attArr)
-                }
+                    .put("content", buildUserContentForRust(turn.content, turn.attachments))
                 arr.put(userObj)
             } else if (turn.role == "assistant") {
                 if (preserveToolSubturns && turn.subturnMessages.isNotEmpty()) {

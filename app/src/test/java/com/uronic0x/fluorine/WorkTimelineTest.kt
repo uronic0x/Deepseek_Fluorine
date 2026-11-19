@@ -1,14 +1,12 @@
 package com.uronic0x.fluorine
 
-import com.sun.net.httpserver.HttpServer
-import com.uronic0x.fluorine.engine.KotlinNativeEngine
+import com.uronic0x.fluorine.bridge.FluorineBridge
 import com.uronic0x.fluorine.protocol.*
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
-import java.net.InetSocketAddress
-import java.nio.file.Files
+import java.util.concurrent.atomic.AtomicBoolean
 
 class WorkTimelineTest {
     @Test
@@ -63,69 +61,159 @@ class WorkTimelineTest {
     }
 
     @Test
-    fun oneToolBatchStillGetsAFinalResponseAndOrderedStreamEvents() = assertToolLoop(streaming = true)
+    fun rustWorkLoopEventsPreserveCommentaryToolsAndSubturnsWithoutDuplication() {
+        assertRustWorkStream(cancelAfterTool = false)
+    }
 
     @Test
-    fun jsonFallbackAlsoPreservesCommentaryAndTools() = assertToolLoop(streaming = false)
+    fun cancellationAfterToolPreservesCommentaryAndOutputInRustBridge() {
+        assertRustWorkStream(cancelAfterTool = true)
+    }
 
-    @Test
-    fun cancellationAfterAToolPreservesItsCommentaryAndOutput() = assertToolLoop(streaming = true, cancel = true)
+    private fun assertRustWorkStream(cancelAfterTool: Boolean) {
+        val cancelledInNative = AtomicBoolean(false)
+        val step1 = JSONObject()
+            .put("round", 1)
+            .put("thinking", "")
+            .put("content", "先计算。")
+            .put(
+                "local_tool_calls",
+                JSONArray().put(
+                    JSONObject()
+                        .put("round", 1)
+                        .put("id", "c1")
+                        .put("name", "calc")
+                        .put("arguments", """{"expression":"(2+3)*4"}""")
+                        .put("result", """{"ok":true,"value":20}""")
+                )
+            )
+        val step2 = JSONObject()
+            .put("round", 2)
+            .put("thinking", "核对结果")
+            .put("content", "结果为 20。")
+            .put("local_tool_calls", JSONArray())
 
-    private fun assertToolLoop(streaming: Boolean, cancel: Boolean = false) {
-        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-        val requests = mutableListOf<JSONObject>()
-        server.createContext("/chat/completions") { exchange ->
-            val request = JSONObject(exchange.requestBody.bufferedReader().use { it.readText() })
-            requests.add(request)
-            val first = requests.size == 1
-            val delta = JSONObject().put("content", if (first) "先计算。" else "结果为 20。")
-            if (first) delta.put("tool_calls", JSONArray().put(JSONObject()
-                .put("index", 0).put("id", "c1").put("type", "function")
-                .put("function", JSONObject().put("name", "calc")
-                    .put("arguments", """{"expression":"(2+3)*4"}"""))))
-            val choice = JSONObject().put(if (streaming) "delta" else "message", delta)
-                .put("finish_reason", if (first) "tool_calls" else "stop")
-            val response = JSONObject().put("choices", JSONArray().put(choice)).toString()
-            val body = if (streaming) "data: $response\n\ndata: [DONE]\n\n" else response
-            val bytes = body.toByteArray(Charsets.UTF_8)
-            exchange.responseHeaders.add("Content-Type", if (streaming) "text/event-stream" else "application/json")
-            exchange.sendResponseHeaders(200, bytes.size.toLong())
-            exchange.responseBody.use { it.write(bytes) }
-        }
-        server.start()
-        val workspace = Files.createTempDirectory("work-timeline-test").toFile()
-        try {
-            val live = WorkTimeline()
-            val result = CoreProtocol.parseEngineTurnResult(KotlinNativeEngine.chatCompleteStreaming(
-                requestId = 9001L,
-                requestJson = JSONObject().put("api_key", "test-only")
-                    .put("base_url", "http://127.0.0.1:${server.address.port}")
-                    .put("stage", "work").put("max_rounds", 1)
-                    .put("messages", JSONArray().put(JSONObject()
-                        .put("role", "user").put("content", "计算"))).toString(),
-                defaultWorkspaceDir = workspace,
-                onEvent = {
-                    live.accept(it)
-                    if (cancel && it is StreamUiEvent.ToolRecord) KotlinNativeEngine.cancelStream(9001L)
+        val toolCallsArr = JSONArray().put(
+            JSONObject()
+                .put("round", 1)
+                .put("id", "c1")
+                .put("name", "calc")
+                .put("arguments", """{"expression":"(2+3)*4"}""")
+                .put("result", """{"ok":true,"value":20}""")
+        )
+        val subturnsArr = JSONArray()
+            .put(JSONObject().put("role", "assistant").put("content", "先计算。"))
+            .put(JSONObject().put("role", "tool").put("tool_call_id", "c1").put("content", """{"ok":true,"value":20}"""))
+
+        val fakeBackend = object : FluorineBridge.NativeBackend {
+            override val isLoaded: Boolean = true
+            override fun getMeta(workspacePath: String, allowSdcardReadonly: Boolean): String = """{"ok":true}"""
+            override fun fetchModels(apiKey: String, baseUrl: String, connectTimeoutSec: Int, readTimeoutSec: Int): String = """{"ok":true}"""
+            override fun uploadFile(
+                apiKey: String, baseUrl: String, filePath: String, filename: String,
+                mimeType: String, purpose: String, allowedRootsNewline: String,
+                connectTimeoutSec: Int, readTimeoutSec: Int
+            ): String = """{"ok":true}"""
+            override fun executeLocalTool(name: String, argumentsJson: String, workspacePath: String, allowSdcardReadonly: Boolean): String = """{"ok":true}"""
+            override fun buildUpstreamPayload(requestJson: String): String = """{"ok":true}"""
+            override fun cancelStream(requestId: Long): Boolean {
+                cancelledInNative.set(true)
+                return true
+            }
+
+            override fun streamChat(
+                requestId: Long,
+                apiKey: String,
+                requestJson: String,
+                workspacePath: String,
+                allowSdcardReadonly: Boolean,
+                callback: FluorineBridge.JniStreamCallback
+            ) {
+                if (!callback.onEvent("""{"local_tool_event":{"type":"round_started","round":1}}""")) return
+                val r1Delta = JSONObject().put(
+                    "choices",
+                    JSONArray().put(
+                        JSONObject().put(
+                            "delta",
+                            JSONObject()
+                                .put("work_steps", JSONArray().put(step1))
+                                .put("local_tool_calls", toolCallsArr)
+                                .put("subturn_messages", subturnsArr)
+                        )
+                    )
+                )
+                if (!callback.onEvent(r1Delta.toString())) return
+
+                if (cancelledInNative.get()) {
+                    callback.onEvent(
+                        JSONObject()
+                            .put("work_steps", JSONArray().put(step1))
+                            .put("subturn_messages", subturnsArr)
+                            .put("error", JSONObject().put("code", "cancelled").put("message", "Request cancelled"))
+                            .toString()
+                    )
+                    return
                 }
-            ))
-            if (cancel) {
+
+                if (!callback.onEvent("""{"local_tool_event":{"type":"round_started","round":2}}""")) return
+                val r2Delta = JSONObject().put(
+                    "choices",
+                    JSONArray().put(
+                        JSONObject()
+                            .put(
+                                "delta",
+                                JSONObject()
+                                    .put("content", "结果为 20。")
+                                    .put("reasoning_content", "核对结果")
+                                    .put("work_steps", JSONArray().put(step1).put(step2))
+                                    .put("local_tool_calls", toolCallsArr)
+                                    .put("subturn_messages", subturnsArr)
+                            )
+                            .put("finish_reason", "stop")
+                    )
+                )
+                if (!callback.onEvent(r2Delta.toString())) return
+                callback.onEvent("[DONE]")
+            }
+        }
+
+        try {
+            FluorineBridge.setBackendForTesting(fakeBackend)
+            val live = WorkTimeline()
+            val result = CoreProtocol.parseEngineTurnResult(
+                FluorineBridge.chatCompleteStreamingJson(
+                    requestId = 9001L,
+                    requestJson = JSONObject()
+                        .put("api_key", "test-only")
+                        .put("stage", "work")
+                        .put("max_rounds", 2)
+                        .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", "计算")))
+                        .toString(),
+                    onEvent = {
+                        live.accept(it)
+                        if (cancelAfterTool && it is StreamUiEvent.ToolRecord) {
+                            FluorineBridge.cancelStream(9001L)
+                        }
+                    }
+                )
+            )
+
+            if (cancelAfterTool) {
                 assertFalse(result.ok)
-                assertEquals(1, requests.size)
+                assertTrue(cancelledInNative.get())
                 assertEquals("先计算。", result.workSteps.single().content)
                 assertEquals("calc", result.workSteps.single().localToolCalls.single().name)
                 return
             }
+
             assertTrue(result.error, result.ok)
-            assertEquals(2, requests.size)
-            assertEquals("none", requests[1].getString("tool_choice"))
             assertEquals(listOf("先计算。", "结果为 20。"), result.workSteps.map { it.content })
             assertEquals(result.workSteps, live.steps)
             assertEquals("calc", result.workSteps[0].localToolCalls.single().name)
             assertEquals("结果为 20。", result.content)
+            assertEquals(2, result.subturnMessages.size)
         } finally {
-            server.stop(0)
-            workspace.deleteRecursively()
+            FluorineBridge.setBackendForTesting(null)
         }
     }
 }

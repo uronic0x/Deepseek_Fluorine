@@ -1,8 +1,6 @@
 package com.uronic0x.fluorine
 
-import com.uronic0x.fluorine.engine.AndroidHarnessTools
-import com.uronic0x.fluorine.engine.DeterministicTools
-import com.uronic0x.fluorine.engine.KotlinNativeEngine
+import com.uronic0x.fluorine.bridge.FluorineBridge
 import com.uronic0x.fluorine.protocol.ChatAttachment
 import com.uronic0x.fluorine.protocol.ChatMessage
 import com.uronic0x.fluorine.protocol.CitationPoint
@@ -10,6 +8,7 @@ import com.uronic0x.fluorine.protocol.ContextTurn
 import com.uronic0x.fluorine.protocol.ConversationSession
 import com.uronic0x.fluorine.protocol.CoreProtocol
 import com.uronic0x.fluorine.protocol.LocalToolCallRecord
+import com.uronic0x.fluorine.protocol.StreamUiEvent
 import com.uronic0x.fluorine.protocol.WorkToolsConfig
 import com.uronic0x.fluorine.ui.components.LatexMathParser
 import com.uronic0x.fluorine.ui.components.MathNode
@@ -25,125 +24,81 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 import java.nio.file.Files
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 class FluorineProtocolAndToolsTest {
 
-    @Test
-    fun proOmitsWebSearchAndUsesTopLevelReasoningEffort() {
-        val proReq = JSONObject()
-            .put("model", "deepseek-v4-pro")
-            .put("stage", "chat")
-            .put("use_web", true)
-            .put("use_thinking", true)
-            .put("effort", "medium")
-            .put("max_tokens", 8192)
-            .put(
-                "messages",
-                JSONArray().put(
-                    JSONObject()
-                        .put("role", "user")
-                        .put("content", "Hello")
-                        .put("reasoning_content", "must be stripped on user")
-                )
-            )
+    private open class StubNativeBackend(override val isLoaded: Boolean = true) :
+        FluorineBridge.NativeBackend {
+        override fun getMeta(workspacePath: String, allowSdcardReadonly: Boolean): String =
+            JSONObject().put("ok", true).put("engine", "rust-jni").toString()
 
-        val proPayload = KotlinNativeEngine.buildUpstreamPayload(proReq)
-        assertFalse(proPayload.has("tools"))
-        assertFalse(proPayload.has("reasoning"))
-        assertEquals("enabled", proPayload.getJSONObject("thinking").getString("type"))
-        assertEquals("high", proPayload.getString("reasoning_effort"))
-        assertFalse(
-            proPayload.getJSONArray("messages")
-                .getJSONObject(1)
-                .has("reasoning_content")
-        )
+        override fun fetchModels(
+            apiKey: String,
+            baseUrl: String,
+            connectTimeoutSec: Int,
+            readTimeoutSec: Int
+        ): String = JSONObject().put("ok", true).put("models", JSONArray()).toString()
 
-        val flashReq = JSONObject(proReq.toString()).put("model", "deepseek-flash")
-        val flashPayload = KotlinNativeEngine.buildUpstreamPayload(flashReq)
-        assertTrue(flashPayload.has("tools"))
-        val tools = flashPayload.getJSONArray("tools")
-        assertEquals(2, tools.length())
-        assertEquals("deepseek_web_search", tools.getJSONObject(0).getString("type"))
-        assertEquals("deepseek_read_url", tools.getJSONObject(1).getString("type"))
+        override fun uploadFile(
+            apiKey: String,
+            baseUrl: String,
+            filePath: String,
+            filename: String,
+            mimeType: String,
+            purpose: String,
+            allowedRootsNewline: String,
+            connectTimeoutSec: Int,
+            readTimeoutSec: Int
+        ): String = JSONObject().put("ok", true).put("id", "file-stub-1").toString()
+
+        override fun streamChat(
+            requestId: Long,
+            apiKey: String,
+            requestJson: String,
+            workspacePath: String,
+            allowSdcardReadonly: Boolean,
+            callback: FluorineBridge.JniStreamCallback
+        ) = Unit
+
+        override fun cancelStream(requestId: Long): Boolean = true
+
+        override fun executeLocalTool(
+            name: String,
+            argumentsJson: String,
+            workspacePath: String,
+            allowSdcardReadonly: Boolean
+        ): String = JSONObject().put("ok", true).toString()
+
+        override fun buildUpstreamPayload(requestJson: String): String =
+            JSONObject().put("ok", true).toString()
     }
 
     @Test
-    fun workModeNeverMixesBuiltInSearchWithFunctionToolsAndRetainsReasoningWhenToolsPresent() {
-        val toolCallArr = JSONArray().put(
-            JSONObject()
-                .put("id", "call_1")
-                .put("type", "function")
-                .put(
-                    "function",
-                    JSONObject()
-                        .put("name", "calc_eval")
-                        .put("arguments", """{"expr":"2^10"}""")
-                )
+    fun workToolsConfigMatches19RustCanonicalToolsAndMapsLegacyAliases() {
+        val allEnabled = WorkToolsConfig(
+            deterministic = true,
+            workspaceRead = true,
+            workspaceWrite = true,
+            git = true,
+            shellExec = true,
+            deviceControl = true
         )
-        val workReq = JSONObject()
-            .put("model", "deepseek-flash")
-            .put("stage", "work")
-            .put("use_web", true)
-            .put("use_thinking", true)
-            .put("use_local_tools", true)
-            .put("effort", "max")
-            .put(
-                "tool_config",
-                WorkToolsConfig(
-                    deterministic = true,
-                    workspaceRead = true,
-                    workspaceWrite = true,
-                    git = true,
-                    shellExec = true,
-                    deviceControl = true
-                ).toJson()
-            )
-            .put(
-                "messages",
-                JSONArray()
-                    .put(JSONObject().put("role", "user").put("content", "Compute 2^10"))
-                    .put(
-                        JSONObject()
-                            .put("role", "assistant")
-                            .put("content", "")
-                            .put("reasoning_content", "step-by-step reasoning")
-                            .put("tool_calls", toolCallArr)
-                    )
-                    .put(
-                        JSONObject()
-                            .put("role", "tool")
-                            .put("tool_call_id", "call_1")
-                            .put("content", """{"ok":true,"result":1024}""")
-                    )
-                    .put(
-                        JSONObject()
-                            .put("role", "assistant")
-                            .put("content", "2^10 = 1024")
-                            .put("reasoning_content", "final turn reasoning")
-                    )
-                    .put(JSONObject().put("role", "user").put("content", "Now add 24"))
-            )
+        assertEquals(19, WorkToolsConfig.ALL_DESCRIPTORS.size)
+        assertEquals(19, allEnabled.enabledToolNames().size)
+        assertTrue("device_probe" in allEnabled.enabledToolNames())
+        assertTrue("git_inspect" in allEnabled.enabledToolNames())
+        assertTrue("termux_device" in allEnabled.enabledToolNames())
+        assertTrue("android_ui" in allEnabled.enabledToolNames())
 
-        val payload = KotlinNativeEngine.buildUpstreamPayload(workReq)
-        val tools = payload.getJSONArray("tools")
-        // 2 function web tools (web_search + web_fetch) + 9 deterministic + 9 harness = 20
-        assertEquals(20, tools.length())
-        for (i in 0 until tools.length()) {
-            val type = tools.getJSONObject(i).getString("type")
-            assertEquals("function", type)
-            assertFalse(type == "deepseek_web_search" || type == "deepseek_read_url")
-        }
+        // Legacy alias normalization
+        assertEquals("calc", WorkToolsConfig.canonicalToolName("calc_eval"))
+        assertEquals("stats", WorkToolsConfig.canonicalToolName("stats_summary"))
+        assertEquals("git_inspect", WorkToolsConfig.canonicalToolName("git_cmd"))
+        assertEquals("termux_device", WorkToolsConfig.canonicalToolName("termux_api"))
+        assertEquals("android_ui", WorkToolsConfig.canonicalToolName("self_adb"))
 
-        val msgs = payload.getJSONArray("messages")
-        assertEquals(6, msgs.length())
-        assertEquals("system", msgs.getJSONObject(0).getString("role"))
-        assertTrue(msgs.getJSONObject(2).has("tool_calls"))
-        assertEquals("step-by-step reasoning", msgs.getJSONObject(2).getString("reasoning_content"))
-        assertEquals("final turn reasoning", msgs.getJSONObject(4).getString("reasoning_content"))
-    }
-
-    @Test
-    fun workToolsConfigCustomizesDeclarationsAndEnforcesExecutionAllowlist() {
         val cfg = WorkToolsConfig(
             deterministic = true,
             workspaceRead = true,
@@ -161,156 +116,252 @@ class FluorineProtocolAndToolsTest {
         assertFalse("stats" in enabled)
         assertFalse(cfg.isToolEnabled("stats_summary"))
         assertFalse("fs_write" in enabled)
-        assertFalse("git_cmd" in enabled)
-        assertFalse("termux_api" in enabled)
-        assertFalse("self_adb" in enabled)
+        assertFalse(cfg.isToolEnabled("git_cmd"))
+        assertFalse(cfg.isToolEnabled("termux_api"))
+        assertFalse(cfg.isToolEnabled("self_adb"))
 
-        val tempWs: File = Files.createTempDirectory("fluorine_allowlist_test").toFile()
-        try {
-            val blockedWrite = KotlinNativeEngine.executeLocalTool(
-                name = "fs_write",
-                rawArguments = """{"path":"x.txt","content":"nope"}""",
-                workspaceRoot = tempWs,
-                allowSdcardReadonly = false,
-                enabledTools = enabled
-            )
-            assertFalse(blockedWrite.getBoolean("ok"))
+        val roundTripped = WorkToolsConfig.fromJson(cfg.toJson())
+        assertEquals(setOf("stats"), roundTripped.disabledTools)
+        assertFalse(roundTripped.workspaceWrite)
+        assertTrue(roundTripped.shellExec)
+    }
 
-            val blockedStats = KotlinNativeEngine.executeLocalTool(
-                name = "stats_summary",
-                rawArguments = """{"values":[1,2,3]}""",
-                workspaceRoot = tempWs,
-                allowSdcardReadonly = false,
-                enabledTools = enabled
-            )
-            assertFalse(blockedStats.getBoolean("ok"))
+    @Test
+    fun validateBaseUrlEnforcesHttpsOrLoopbackPortAndRejectsUnsafeInputs() {
+        assertEquals(
+            "https://api.deepseek.com",
+            CoreProtocol.validateBaseUrl("https://api.deepseek.com/").getOrThrow()
+        )
+        assertEquals(
+            "https://proxy.example.com:8443/v1",
+            CoreProtocol.validateBaseUrl("  https://proxy.example.com:8443/v1/ ").getOrThrow()
+        )
+        assertEquals(
+            "https://[2001:db8::1]:8443/v1",
+            CoreProtocol.validateBaseUrl("https://[2001:db8::1]:8443/v1").getOrThrow()
+        )
+        assertEquals(
+            "http://127.0.0.1:8765",
+            CoreProtocol.validateBaseUrl("http://127.0.0.1:8765/").getOrThrow()
+        )
+        assertEquals(
+            "http://localhost:8080/v1",
+            CoreProtocol.validateBaseUrl("http://localhost:8080/v1").getOrThrow()
+        )
 
-            val allowedShell = KotlinNativeEngine.executeLocalTool(
-                name = "shell_exec",
-                rawArguments = """{"command":"echo ok_shell"}""",
-                workspaceRoot = tempWs,
-                allowSdcardReadonly = false,
-                enabledTools = enabled
-            )
-            assertTrue(allowedShell.getBoolean("ok"))
-            assertTrue(allowedShell.getString("output").contains("ok_shell"))
-
-            // When device_control is enabled, termux_api runs and truthfully reports ok=false if binary is missing
-            val termuxUnavailable = AndroidHarnessTools.execute(
-                name = "termux_api",
-                args = JSONObject().put("api", "battery-status"),
-                workspaceRoot = tempWs,
-                allowSdcardReadonly = false,
-                enabledTools = setOf("termux_api")
-            )
-            assertFalse(termuxUnavailable.getBoolean("ok"))
-        } finally {
-            tempWs.deleteRecursively()
+        val invalidUrls = listOf(
+            "",
+            "http://api.deepseek.com",
+            "http://127.0.0.1",
+            "http://127.0.0.1.evil.com:8080",
+            "http://localhost.evil.com:8080",
+            "https://user:pass@api.deepseek.com",
+            "https://api.deepseek.com?foo=bar",
+            "https://api.deepseek.com#frag",
+            "https://api.deepseek.com/v1/../v2",
+            "https://api.deepseek.com:99999",
+            "ftp://api.deepseek.com"
+        )
+        for (bad in invalidUrls) {
+            assertTrue("Expected failure for: $bad", CoreProtocol.validateBaseUrl(bad).isFailure)
         }
     }
 
     @Test
-    fun deterministicToolsComputeAccurateResults() {
-        val calcRes = DeterministicTools.execute(
-            "calc_eval",
-            JSONObject()
-                .put("expr", "round(sqrt(2)^2 + x, 4)")
-                .put("vars", JSONObject().put("x", 3.5))
+    fun sanitizeAttachmentNeutralizesHeaderInjectionAndImportedPaths() {
+        val raw = ChatAttachment(
+            id = "att-1",
+            name = "../../secret\r\nX-Inject: 1\"bad.pdf",
+            mimeType = "application/pdf; boundary=evil\r\nX-Bad: 1",
+            kind = "executable",
+            localPath = "/data/data/com.uronic0x.fluorine/shared_prefs/fluorine_prefs.xml",
+            sizeBytes = -50L,
+            fileId = "file-123\r\n",
+            parsePurpose = "evil_purpose\r\n"
         )
-        assertTrue(calcRes.getBoolean("ok"))
-        assertEquals(5.5, calcRes.getDouble("result"), 1e-6)
 
-        val statsRes = DeterministicTools.execute(
-            "stats_summary",
-            JSONObject().put("values", JSONArray(listOf(10, 20, 30, 40, 50)))
-        )
-        assertTrue(statsRes.getBoolean("ok"))
-        assertEquals(30.0, statsRes.getDouble("mean"), 1e-6)
-        assertEquals(30.0, statsRes.getDouble("median"), 1e-6)
+        val imported = CoreProtocol.sanitizeAttachment(raw, stripLocalPath = true)
+        assertFalse(imported.name.contains("\r"))
+        assertFalse(imported.name.contains("\n"))
+        assertFalse(imported.name.contains("/"))
+        assertFalse(imported.name.contains("\""))
+        assertEquals("application/pdf", imported.mimeType)
+        assertEquals("document", imported.kind)
+        assertEquals("user_data", imported.parsePurpose)
+        assertEquals("", imported.localPath)
+        assertEquals(0L, imported.sizeBytes)
+        assertEquals("file-123", imported.fileId)
 
-        val unitRes = DeterministicTools.execute(
-            "unit_convert",
-            JSONObject().put("value", 100.0).put("from", "c").put("to", "f")
-        )
-        assertTrue(unitRes.getBoolean("ok"))
-        assertEquals(212.0, unitRes.getDouble("result"), 1e-6)
-
-        val dateRes = DeterministicTools.execute(
-            "date_calc",
-            JSONObject().put("op", "diff_days").put("date", "2026-01-01").put("other_date", "2026-01-31")
-        )
-        assertTrue(dateRes.getBoolean("ok"))
-        assertEquals(30L, dateRes.getLong("days"))
+        val invalidMime = CoreProtocol.sanitizeAttachment(raw.copy(mimeType = "text/plain\r\nInject: 1"))
+        assertEquals("application/octet-stream", invalidMime.mimeType)
     }
 
     @Test
-    fun workspaceHarnessToolsWriteReadEditAndBlockTraversal() {
-        val tempWs: File = Files.createTempDirectory("fluorine_ws_test").toFile()
+    fun deserializeSessionsStoreCheckedRejectsOversizedAndMalformedPayloads() {
+        assertTrue(CoreProtocol.deserializeSessionsStoreChecked("{bad json").isFailure)
+
+        val oversized = " ".repeat(CoreProtocol.MAX_STORE_JSON_BYTES + 64)
+        val res = CoreProtocol.deserializeSessionsStoreChecked(oversized)
+        assertTrue(res.isFailure)
+    }
+
+    @Test
+    fun fluorineBridgeEnforcesRustOnlyWithNoFallbackWhenNativeMissing() {
         try {
-            val writeRes = AndroidHarnessTools.execute(
-                "fs_write",
-                JSONObject().put("path", "notes/hello.txt").put("content", "line1\nline2\nline3"),
-                tempWs,
-                allowSdcardReadonly = false
-            )
-            assertTrue(writeRes.getBoolean("ok"))
-            assertEquals("notes/hello.txt", writeRes.getString("path"))
+            FluorineBridge.setBackendForTesting(StubNativeBackend(isLoaded = false))
+            assertFalse(FluorineBridge.isRustJniLoaded)
 
-            val editRes = AndroidHarnessTools.execute(
-                "fs_edit",
-                JSONObject()
-                    .put("path", "notes/hello.txt")
-                    .put("old_text", "line2")
-                    .put("new_text", "line2_updated"),
-                tempWs,
-                allowSdcardReadonly = false
-            )
-            assertTrue(editRes.getBoolean("ok"))
+            val meta = JSONObject(FluorineBridge.engineInfoJson())
+            assertFalse(meta.getBoolean("ok"))
+            assertEquals("rust-jni-missing", meta.getString("engine"))
 
-            val readRes = AndroidHarnessTools.execute(
-                "fs_read",
-                JSONObject().put("path", "notes/hello.txt").put("start_line", 2).put("end_line", 2),
-                tempWs,
-                allowSdcardReadonly = false
+            val chatRes = CoreProtocol.parseEngineTurnResult(
+                FluorineBridge.chatCompleteStreamingJson(
+                    requestId = 101L,
+                    requestJson = """{"api_key":"sk-test","model":"deepseek-flash","messages":[]}""",
+                    onEvent = {}
+                )
             )
-            assertTrue(readRes.getBoolean("ok"))
-            assertEquals("line2_updated", readRes.getString("content"))
-
-            val traversalRes = AndroidHarnessTools.execute(
-                "fs_write",
-                JSONObject().put("path", "../escape.txt").put("content", "bad"),
-                tempWs,
-                allowSdcardReadonly = false
-            )
-            assertFalse(traversalRes.getBoolean("ok"))
-
-            // Append limit check (512 KiB max)
-            val hugeChunk = "a".repeat(300 * 1024)
-            assertTrue(
-                AndroidHarnessTools.execute(
-                    "fs_write",
-                    JSONObject().put("path", "big.txt").put("content", hugeChunk),
-                    tempWs,
-                    allowSdcardReadonly = false
-                ).getBoolean("ok")
-            )
-            val appendOverflow = AndroidHarnessTools.execute(
-                "fs_write",
-                JSONObject().put("path", "big.txt").put("content", hugeChunk).put("append", true),
-                tempWs,
-                allowSdcardReadonly = false
-            )
-            assertFalse(appendOverflow.getBoolean("ok"))
+            assertFalse(chatRes.ok)
+            assertTrue(chatRes.error.contains("libfluorine.so"))
+            assertFalse(FluorineBridge.cancelStream(101L))
         } finally {
-            tempWs.deleteRecursively()
+            FluorineBridge.setBackendForTesting(null)
         }
     }
 
     @Test
-    fun parseEngineTurnResultPreservesPartialOutputOnContentFilterAndAbort() {
+    fun fluorineBridgeRoutesStreamChatAndCancelStrictlyToRustBackend() {
+        val capturedApiKey = AtomicReference("")
+        val capturedReqJson = AtomicReference("")
+        val cancelCalled = AtomicBoolean(false)
+
+        val fakeBackend = object : StubNativeBackend(isLoaded = true) {
+            override fun streamChat(
+                requestId: Long,
+                apiKey: String,
+                requestJson: String,
+                workspacePath: String,
+                allowSdcardReadonly: Boolean,
+                callback: FluorineBridge.JniStreamCallback
+            ) {
+                capturedApiKey.set(apiKey)
+                capturedReqJson.set(requestJson)
+                assertTrue(
+                    callback.onEvent(
+                        """{"choices":[{"delta":{"reasoning_content":"先分析"}}]}"""
+                    )
+                )
+                assertTrue(
+                    callback.onEvent(
+                        """{"choices":[{"delta":{"content":"最终回答"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":8,"server_tool_use":{"tool_search":2,"tool_fetch":1}}}"""
+                    )
+                )
+                assertTrue(callback.onEvent("[DONE]"))
+            }
+
+            override fun cancelStream(requestId: Long): Boolean {
+                cancelCalled.set(true)
+                return true
+            }
+        }
+
+        val events = mutableListOf<StreamUiEvent>()
+        try {
+            FluorineBridge.setBackendForTesting(fakeBackend)
+            assertTrue(FluorineBridge.isRustJniLoaded)
+
+            val raw = FluorineBridge.chatCompleteStreamingJson(
+                requestId = 202L,
+                requestJson = JSONObject()
+                    .put("api_key", "sk-secret")
+                    .put("base_url", "https://api.deepseek.com/")
+                    .put("model", "deepseek-flash")
+                    .put("stage", "chat")
+                    .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", "hi")))
+                    .toString(),
+                onEvent = { events.add(it) }
+            )
+            val parsed = CoreProtocol.parseEngineTurnResult(raw)
+            assertTrue(parsed.ok)
+            assertEquals("sk-secret", capturedApiKey.get())
+            val forwarded = JSONObject(capturedReqJson.get())
+            assertFalse("api_key should be stripped from requestJson body", forwarded.has("api_key"))
+            assertEquals("https://api.deepseek.com", forwarded.getString("base_url"))
+            assertEquals("先分析", parsed.thinking)
+            assertEquals("最终回答", parsed.content)
+            assertEquals(3, parsed.serverToolUseCount)
+            assertTrue(events.any { it is StreamUiEvent.ThinkingDelta && it.delta == "先分析" })
+            assertTrue(events.any { it is StreamUiEvent.ContentDelta && it.delta == "最终回答" })
+
+            assertTrue(FluorineBridge.cancelStream(202L))
+            assertTrue(cancelCalled.get())
+        } finally {
+            FluorineBridge.setBackendForTesting(null)
+        }
+    }
+
+    @Test
+    fun fluorineBridgeUploadRejectsInvalidBaseUrlAndUninitializedManagedRoots() {
+        val tempRoot = Files.createTempDirectory("fluorine_att_root").toFile()
+        val sampleFile = File(tempRoot, "doc.pdf").apply { writeText("pdf") }
+        val uploadedRoots = AtomicReference("")
+        val fakeBackend = object : StubNativeBackend(isLoaded = true) {
+            override fun uploadFile(
+                apiKey: String,
+                baseUrl: String,
+                filePath: String,
+                filename: String,
+                mimeType: String,
+                purpose: String,
+                allowedRootsNewline: String,
+                connectTimeoutSec: Int,
+                readTimeoutSec: Int
+            ): String {
+                uploadedRoots.set(allowedRootsNewline)
+                return JSONObject().put("ok", true).put("id", "file-ok-1").toString()
+            }
+        }
+        try {
+            FluorineBridge.setBackendForTesting(fakeBackend)
+            FluorineBridge.setManagedAttachmentRootsForTesting(emptyList())
+
+            val att = ChatAttachment(
+                id = "a1",
+                name = "doc.pdf",
+                mimeType = "application/pdf",
+                kind = "document",
+                localPath = sampleFile.absolutePath
+            )
+            val noRootsResp = JSONObject(
+                FluorineBridge.uploadAttachmentFileJson("sk-test", "https://api.deepseek.com", att)
+            )
+            assertFalse(noRootsResp.getBoolean("ok"))
+
+            FluorineBridge.setManagedAttachmentRootsForTesting(listOf(tempRoot))
+            val badUrlResp = JSONObject(
+                FluorineBridge.uploadAttachmentFileJson("sk-test", "http://evil.example.com", att)
+            )
+            assertFalse(badUrlResp.getBoolean("ok"))
+
+            val okResp = JSONObject(
+                FluorineBridge.uploadAttachmentFileJson("sk-test", "https://api.deepseek.com", att)
+            )
+            assertTrue(okResp.getBoolean("ok"))
+            assertEquals("file-ok-1", okResp.getString("id"))
+            assertTrue(uploadedRoots.get().contains(tempRoot.canonicalPath))
+        } finally {
+            FluorineBridge.setBackendForTesting(null)
+            FluorineBridge.setManagedAttachmentRootsForTesting(emptyList())
+            tempRoot.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun parseEngineTurnResultPreservesPartialOutputAndSupportsObjectError() {
         val raw = JSONObject()
             .put("ok", false)
-            .put("error", "Upstream terminated with content_filter")
+            .put("error", JSONObject().put("code", "content_filter").put("message", "Upstream terminated with content_filter"))
             .put("finish_reason", "content_filter")
             .put("incomplete_notice", "生成因触发内容安全审核被提前终止（已完整保留已输出的思考与正文）")
             .put("thinking", "已输出思考过程")
@@ -322,6 +373,7 @@ class FluorineProtocolAndToolsTest {
 
         val parsed = CoreProtocol.parseEngineTurnResult(raw)
         assertFalse(parsed.ok)
+        assertEquals("Upstream terminated with content_filter", parsed.error)
         assertEquals("content_filter", parsed.finishReason)
         assertEquals("已输出思考过程", parsed.thinking)
         assertEquals("已流出的半截回答内容", parsed.content)
@@ -330,40 +382,9 @@ class FluorineProtocolAndToolsTest {
     }
 
     @Test
-    fun multimodalCapabilitiesAndAttachmentPayloadBlocksWork() {
+    fun multimodalCapabilitiesWork() {
         assertTrue(CoreProtocol.supportsMultimodal("deepseek-flash", CoreProtocol.DEFAULT_MODEL_CAPABILITIES))
         assertFalse(CoreProtocol.supportsMultimodal("deepseek-v4-pro", CoreProtocol.DEFAULT_MODEL_CAPABILITIES))
-
-        val req = JSONObject()
-            .put("model", "deepseek-flash")
-            .put("stage", "chat")
-            .put(
-                "messages",
-                JSONArray().put(
-                    JSONObject()
-                        .put("role", "user")
-                        .put("content", "请总结附件文档")
-                        .put(
-                            "attachments",
-                            JSONArray().put(
-                                JSONObject()
-                                    .put("kind", "document")
-                                    .put("name", "spec.pdf")
-                                    .put("mime_type", "application/pdf")
-                                    .put("file_id", "file-abc-123")
-                            )
-                        )
-                )
-            )
-
-        val payload = KotlinNativeEngine.buildUpstreamPayload(req)
-        val userMsg = payload.getJSONArray("messages").getJSONObject(1)
-        val blocks = userMsg.getJSONArray("content")
-        assertEquals(2, blocks.length())
-        assertEquals("file", blocks.getJSONObject(0).getString("type"))
-        assertEquals("file-abc-123", blocks.getJSONObject(0).getString("file_id"))
-        assertEquals("text", blocks.getJSONObject(1).getString("type"))
-        assertEquals("请总结附件文档", blocks.getJSONObject(1).getString("text"))
     }
 
     @Test
@@ -379,7 +400,7 @@ class FluorineProtocolAndToolsTest {
             LocalToolCallRecord(
                 round = 2,
                 id = "c2",
-                name = "calc_eval",
+                name = "calc",
                 arguments = """{"expr":"1+1"}""",
                 output = """{"ok":true,"result":2}"""
             )
@@ -517,7 +538,6 @@ class FluorineProtocolAndToolsTest {
         assertEquals("real-1", restored[0].id)
         assertEquals("real-1", activeId)
 
-        // When only blank sessions exist, keep a single blank session instead of accumulating
         val allBlankJson = CoreProtocol.serializeSessionsStore(listOf(blank1, blank2), "blank-2")
         val (blankRestored, blankActiveId) = CoreProtocol.deserializeSessionsStore(allBlankJson)
         assertEquals(1, blankRestored.size)
@@ -540,7 +560,11 @@ class FluorineProtocolAndToolsTest {
                 "completion_tokens": 450,
                 "total_tokens": 2250,
                 "prompt_cache_hit_tokens": 1600,
-                "prompt_cache_miss_tokens": 200
+                "prompt_cache_miss_tokens": 200,
+                "server_tool_use": {
+                  "tool_search": 1,
+                  "tool_fetch": 2
+                }
               }
             }
         """.trimIndent()
@@ -550,9 +574,10 @@ class FluorineProtocolAndToolsTest {
         assertEquals(2050, parsed.contextTokens)
         assertEquals(5200, parsed.cumulativePromptTokens)
         assertEquals(450, parsed.completionTokens)
+        assertEquals(3, parsed.serverToolUseCount)
         assertTrue(parsed.usageText.contains("上下文 2050 (累计输入 5200)"))
         assertTrue(parsed.usageText.contains("输出 450 tokens"))
         assertTrue(parsed.usageText.contains("缓存命中 1600 · 88%"))
+        assertTrue(parsed.usageText.contains("服务端联网调用 3 次"))
     }
 }
-

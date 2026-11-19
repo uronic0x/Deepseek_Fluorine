@@ -80,7 +80,7 @@
 
     <string name="settings_key_label">DeepSeek API Key</string>
     <string name="settings_key_hint">sk-…</string>
-    <string name="settings_remember_key">在本地安全保存 API Key</string>
+    <string name="settings_remember_key">在本地保存 API Key</string>
     <string name="settings_base_url_label">API Base URL（支持自定义兼容端点）</string>
     <string name="settings_base_url_hint">https://api.deepseek.com</string>
 
